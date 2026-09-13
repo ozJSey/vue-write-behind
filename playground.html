@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vue-write-behind — playground</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb;
+    --card: #fafafa; --accent: #2563eb; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --fg: #e8e8ea; --muted: #9aa0aa; --line: #262a33;
+            --card: #161a21; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 2rem 1.25rem 4rem; background: var(--bg); color: var(--fg);
+         font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .35rem; }
+  .lead { color: var(--muted); margin: 0 0 2rem; max-width: 46rem; }
+  section { border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+            padding: 1rem 1.15rem 1.25rem; margin-bottom: 1.25rem; }
+  .why { color: var(--muted); font-size: .875rem; margin: 0 0 .9rem; }
+  label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .25rem; }
+  input[type="text"] { width: 100%; padding: .5rem .6rem; font: inherit; border-radius: 6px;
+                       border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  button { font: inherit; padding: .35rem .7rem; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .75rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  @media (max-width: 46rem) { .grid { grid-template-columns: 1fr; } }
+  pre { margin: .6rem 0 0; padding: .55rem .65rem; background: var(--bg); border: 1px solid var(--line);
+        border-radius: 6px; font-size: .78rem; overflow-x: auto; max-height: 11rem; }
+  .pill { display: inline-block; font-size: .72rem; padding: .1rem .45rem; border-radius: 999px;
+          border: 1px solid var(--line); color: var(--muted); }
+  .pill.on { color: var(--accent); border-color: var(--accent); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  code { font-size: .85em; }
+</style>
+</head>
+<body>
+<main id="app">
+  <h1>vue-write-behind</h1>
+  <p class="lead">
+    The write never comes back. Local state stays authoritative; the server's reply is discarded on
+    purpose. Everything below runs against <code>dist/vueWriteBehind.min.js</code>.
+  </p>
+
+  <section>
+    <h2>1 — the cell does not jump</h2>
+    <p class="why">
+      The server here is slow (2s) and opinionated: it always answers with the value
+      <strong>UPPERCASED</strong>. Type, keep typing while the request is out, and watch the input:
+      the reply never lands in it. This is the whole product.
+    </p>
+    <label for="cell-a1">A1</label>
+    <input id="cell-a1" type="text" v-model="cells.A1" data-testid="cell" autocomplete="off" />
+    <div class="row">
+      <span class="pill" :class="{ on: outbox.isSyncing }" data-testid="syncing">
+        {{ outbox.isSyncing ? 'saving…' : 'idle' }}
+      </span>
+      <span class="pill" data-testid="pending">pending: {{ outbox.pending.join(',') || 'none' }}</span>
+      <span class="pill" data-testid="inflight">in flight: {{ outbox.inFlight.join(',') || 'none' }}</span>
+      <button type="button" @click="outbox.flush()" data-testid="flush">flush()</button>
+    </div>
+    <pre data-testid="log">{{ log.length ? log.join('\n') : 'no requests yet' }}</pre>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>2 — failure never rolls back</h2>
+      <p class="why">
+        Break the endpoint and keep typing. The key stays pending, the backoff grows
+        1&nbsp;→&nbsp;2&nbsp;→&nbsp;4&nbsp;→&nbsp;8s, and every attempt carries the
+        <em>current</em> value — not the one that failed.
+      </p>
+      <label for="cell-b2">B2</label>
+      <input id="cell-b2" type="text" v-model="flaky.B2" data-testid="flaky-cell" autocomplete="off" />
+      <div class="row">
+        <button type="button" @click="serverDown = !serverDown" data-testid="toggle-server">
+          server: {{ serverDown ? 'down' : 'up' }}
+        </button>
+        <button type="button" @click="flakyOutbox.retry()" data-testid="retry">retry()</button>
+        <button type="button" @click="flakyOutbox.discard('B2')" data-testid="discard">discard('B2')</button>
+      </div>
+      <div class="row">
+        <span class="pill" :class="{ bad: flakyOutbox.failed.length }" data-testid="failed">
+          failed: {{ flakyOutbox.failed.length }}
+        </span>
+        <span class="pill" data-testid="attempts">
+          attempts: {{ flakyOutbox.failed[0]?.attempts ?? 0 }}
+        </span>
+        <span class="pill" :class="{ ok: !flakyOutbox.pending.length }" data-testid="flaky-pending">
+          pending: {{ flakyOutbox.pending.join(',') || 'none' }}
+        </span>
+      </div>
+      <pre data-testid="flaky-log">{{ flakyLog.length ? flakyLog.join('\n') : 'no attempts yet' }}</pre>
+    </section>
+
+    <section>
+      <h2>3 — a batch endpoint</h2>
+      <p class="why">
+        One call per tick carrying every due key. Resolve with <code>{ failed: [key] }</code> to fail
+        part of a batch — here <code>C3</code> is always rejected by the server.
+      </p>
+      <label for="cell-c1">C1</label>
+      <input id="cell-c1" type="text" v-model="batch.C1" data-testid="batch-c1" autocomplete="off" />
+      <label for="cell-c3" style="margin-top:.6rem">C3 (server always rejects this one)</label>
+      <input id="cell-c3" type="text" v-model="batch.C3" data-testid="batch-c3" autocomplete="off" />
+      <div class="row">
+        <span class="pill" data-testid="batch-pending">pending: {{ batchOutbox.pending.join(',') || 'none' }}</span>
+        <span class="pill" :class="{ bad: batchOutbox.failed.length }" data-testid="batch-failed">
+          failed: {{ batchOutbox.failed.map(f => f.key).join(',') || 'none' }}
+        </span>
+      </div>
+      <pre data-testid="batch-log">{{ batchLog.length ? batchLog.join('\n') : 'no batches yet' }}</pre>
+    </section>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "vue": "./node_modules/vue/dist/vue.esm-browser.js"
+  }
+}
+</script>
+<script type="module">
+// Swap the import map above for "https://unpkg.com/vue@3/dist/vue.esm-browser.js" if you are
+// running this page outside the repo. Either way it must be served over http — ES modules do
+// not load over file://.
+import { createApp, reactive, ref } from 'vue'
+import { useWriteBehind } from './dist/vueWriteBehind.min.js'
+
+const stamp = () => new Date().toLocaleTimeString([], { hour12: false })
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+createApp({
+  setup() {
+    // 1 — slow, opinionated server
+    const cells = reactive({ A1: '' })
+    const log = ref([])
+    const outbox = useWriteBehind(cells, async (value, key) => {
+      log.value.push(`${stamp()}  PUT ${key} = ${JSON.stringify(value)}`)
+      await sleep(2000)
+      log.value.push(`${stamp()}  200 ${key} -> ${JSON.stringify(String(value).toUpperCase())} (discarded)`)
+      return { [key]: String(value).toUpperCase() }
+    })
+
+    // 2 — a failing endpoint
+    const flaky = reactive({ B2: '' })
+    const serverDown = ref(true)
+    const flakyLog = ref([])
+    const flakyOutbox = useWriteBehind(flaky, (value, key) => {
+      flakyLog.value.push(`${stamp()}  PUT ${key} = ${JSON.stringify(value)}`)
+      if (serverDown.value) return Promise.reject(new Error('503 Service Unavailable'))
+      flakyLog.value.push(`${stamp()}  200 ${key}`)
+      return Promise.resolve()
+    })
+
+    // 3 — batched
+    const batch = reactive({ C1: '', C3: '' })
+    const batchLog = ref([])
+    const batchOutbox = useWriteBehind(batch, {
+      flush: (entries) => {
+        batchLog.value.push(`${stamp()}  PATCH ${JSON.stringify(Object.fromEntries(entries))}`)
+        const failed = entries.map(([key]) => key).filter((key) => key === 'C3')
+        if (failed.length) batchLog.value.push(`${stamp()}  207 failed: ${failed.join(',')}`)
+        return { failed }
+      },
+    })
+
+    // Handles for the headless check in scripts/browser-check.mjs.
+    window.__writeBehind = { cells, outbox, log, flaky, flakyOutbox, batch, batchOutbox }
+
+    return { cells, outbox, log, flaky, flakyOutbox, flakyLog, serverDown, batch, batchOutbox, batchLog }
+  },
+}).mount('#app')
+</script>
+</body>
+</html>

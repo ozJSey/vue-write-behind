@@ -1,0 +1,21 @@
+/**
+ * Build entry point — re-exports the public surface from `src/`.
+ *
+ * The split keeps each concern in a single-purpose module (types / outbox /
+ * scheduler / flush / lifecycle / the composable) without changing the bundle:
+ * tsup follows this entry and emits the same minified files. See
+ * ARCHITECTURE.md for the module map and the invariant it protects.
+ */
+export { useWriteBehind } from './src'
+export type {
+  WriteBehind,
+  WriteBehindBaseOptions,
+  WriteBehindBatchOutcome,
+  WriteBehindBatchWriter,
+  WriteBehindFailure,
+  WriteBehindKey,
+  WriteBehindOptions,
+  WriteBehindRetryOptions,
+  WriteBehindSource,
+  WriteBehindWriter,
+} from './src'
