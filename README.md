@@ -1,4 +1,4 @@
-# vue-write-behind
+# @ozjsey/vue-write-behind
 
 **The write never comes back.** Local state stays authoritative and the network is a background
 chore. Edit a cell ten times and one request goes out carrying the tenth value. The server's reply
@@ -9,13 +9,13 @@ been typed since.
 It is a **state outbox, not an operation log**: keys are independent and last-write-wins.
 
 ```bash
-npm install vue-write-behind
+npm install @ozjsey/vue-write-behind
 ```
 
 ```vue
 <script setup lang="ts">
 import { reactive } from 'vue'
-import { useWriteBehind } from 'vue-write-behind'
+import { useWriteBehind } from '@ozjsey/vue-write-behind'
 
 const cells = reactive<Record<string, string>>({ A1: 'foo' })
 const outbox = useWriteBehind(cells, (value, key) => api.put(`/cell/${key}`, value))
@@ -170,7 +170,7 @@ import type {
   WriteBehindRetryOptions,
   WriteBehindSource,
   WriteBehindWriter,
-} from 'vue-write-behind'
+} from '@ozjsey/vue-write-behind'
 ```
 
 `T` is inferred from the record, so `useWriteBehind(reactive<Record<string, number>>({}), write)`
