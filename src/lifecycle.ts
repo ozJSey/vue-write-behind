@@ -1,28 +1,23 @@
 /**
- * Everything with a lifetime outside the outbox: the environment check, the
- * tab-hidden hook and scope disposal.
+ * The two things only Vue can answer: is this a server render, and when does
+ * this composable's owner go away.
  *
- * `visibilitychange` rather than `beforeunload`: mobile browsers routinely
- * discard a page without ever firing `beforeunload`, and Safari fires
- * `pagehide` instead. `visibilitychange → hidden` is the one signal that fires
- * on every platform — and it is still only best-effort, because the page can be
- * frozen before the request leaves. `pending` is exposed so an app can warn.
+ * Everything else with a lifetime — the flush clock, the `visibilitychange`
+ * listener — belongs to the engine and lives in `@ozjsey/write-behind`.
  */
 import { getCurrentScope, onScopeDispose } from 'vue'
 
-/** True when there is no DOM — SSR, or a worker. */
+/**
+ * True when there is no DOM — an SSR render, or a worker.
+ *
+ * The engine itself does **not** make this call: Node is a first-class target
+ * there, and a script batching writes to a database wants its interval. What
+ * makes a server *render* different is that the render has to finish and its
+ * outbox is then thrown away, which only this layer knows — so this is the
+ * layer that passes `autoFlush: false`.
+ */
 export const isServer = (): boolean =>
   typeof window === 'undefined' || typeof document === 'undefined'
-
-/** Subscribe to the tab going hidden. Returns the unsubscribe; a no-op on the server. */
-export function onTabHidden(handler: () => void): () => void {
-  if (isServer()) return () => {}
-  const listener = (): void => {
-    if (document.visibilityState === 'hidden') handler()
-  }
-  document.addEventListener('visibilitychange', listener)
-  return () => document.removeEventListener('visibilitychange', listener)
-}
 
 /**
  * Register cleanup with the surrounding effect scope, if there is one. Called

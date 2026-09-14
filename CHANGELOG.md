@@ -4,6 +4,117 @@ All notable changes to `@ozjsey/vue-write-behind`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-09-14
+
+**Mostly re-plumbing. `useWriteBehind`'s surface did not move: same signature, same returned store,
+same type names, same behaviour** — every one of the 54 existing test declarations still passes
+across Vue 3.5, Vue 3.3 and the node/SSR project with **no assertion changed**, and the browser
+check passes unchanged. (Four writer helpers *inside* those tests grew the new third parameter so
+they could forward it; nothing they assert moved.)
+
+The one addition on top of that is the page-refresh work below. It widens the writer signature
+additively — an existing writer is unaffected — and is inherited from the engine rather than
+implemented here.
+
+### Changed
+
+- **The engine moved to [`@ozjsey/write-behind`](https://www.npmjs.com/package/@ozjsey/write-behind),
+  and this package now consumes it.** Owner request: *"Write behind doesn't really need to be Vue,
+  make a typescript version of it as well, and most ideally vue package uses the package."* One
+  state machine, two packages, no fork.
+
+  `src/outbox.ts`, `src/scheduler.ts` and `src/flush.ts` contained no Vue, no timers coupled to Vue
+  and no I/O, and moved verbatim with their suites (81 declarations). Everything else that was not
+  Vue — the shadow map and its diff, the `keys` filter, `equals`, the clock, the scheduling
+  decision, the snapshot comparators — moved out of `useWriteBehind.ts` too. What is left here is
+  the three things only Vue can answer: `watch(source, sync, { deep: true })`, mirroring the
+  engine's snapshots into a `shallowReactive` store, and `onScopeDispose`.
+
+  It is a real `dependencies` entry and the build treats it as **external**, so installing both
+  packages never ships two copies of the state machine. The ESM artifact is 728 B, down from 5 KB.
+
+- **The batch writer's synthetic error message** is now
+  `write-behind: batch flush reported "<key>" as failed`, previously prefixed `vue-write-behind:`.
+  It is the only user-visible string that moved; nothing in this repo or its tests ever matched on
+  it.
+
+### Added
+
+- **A write can now survive a page refresh**, and every bit of it is inherited from the engine —
+  this package gained **no** unload handling of its own, because there is one implementation to
+  maintain:
+
+  - **`pagehide` is flushed on, as well as `visibilitychange → hidden`**, de-duplicated so a browser
+    firing both sends one request. 0.1.1 listened only to `visibilitychange`, so an iOS Safari
+    swipe-away — which fires `pagehide` and nothing else — flushed **nothing**. Measured on 0.1.1,
+    on both supported Vue versions.
+  - **Your writer is told when the page is going away.** A third argument to `write` and a second to
+    `flush`, both additive — a two-argument writer keeps compiling and keeps working:
+
+    ```ts
+    useWriteBehind(cells, (value, key, { final }) =>
+      fetch(`/cell/${key}`, { method: 'PUT', body: JSON.stringify(value), keepalive: final }),
+    )
+    ```
+
+    `{ reason: 'scheduled' | 'manual' | 'unload', final, attempt }`. The library owns no transport —
+    the writer is yours, by design — so it cannot set `keepalive` for you; what it can do is say
+    when it matters.
+  - **`outbox.flush('unload')`** says the same thing by hand, for a router leave guard or any other
+    signal the engine refuses to listen to on your behalf.
+
+  The README's new *surviving a page refresh* section carries the constraints that bite silently:
+  the 64 KiB budget shared by every in-flight keepalive request in the page, `sendBeacon` being
+  POST-only and sharing it, why the batch writer is the better unload path, and that there is no
+  retry after `final`.
+
+- **`autoFlush`** (default `true`) — do not run the flush clock at all; edits still queue, `pending`
+  still reports them, and `flush()` still sends them. It is the option this layer already sets for
+  you during a server render, now also available on the client for an app that wants to own its
+  cadence.
+
+### Fixed
+
+- **Disposing while a save was in flight could leave the clock running forever.** `onScopeDispose`
+  stopped the scheduler, but nothing stopped a *later* outbox transition from restarting it: a
+  response landing after disposal, with a newer edit queued behind it, found the key still dirty,
+  called `reschedule()` and started a brand new interval on a dead composable — which then kept
+  writing. Disposal is now a one-way flag in the engine, and re-arming happens behind it. Pinned by
+  `createWriteBehind.test.ts` → "cannot be undone by a response landing after it".
+
+  *Exposure:* a component unmounted mid-save with an edit queued behind the in-flight one — closing
+  a modal or navigating away while typing. The requests it kept making were correct and carried the
+  right values; the leak is the timer and the unstoppable writes, not lost data.
+
+### Documented — `<KeepAlive>`, and what it does not do
+
+A deactivated component had never been exercised: `useWriteBehind.test.ts` drives everything through
+`effectScope()` and never mounts anything, so `<KeepAlive>` was untested and undocumented. It now
+has a suite that mounts real components (`keepAlive.test.ts`, `createApp` against a container —
+`@vue/test-utils` stays out of the devDependencies), run on Vue 3.5 **and** 3.3.
+
+The finding is that **deactivation changes nothing**. Vue 3.5 added `EffectScope.pause()`, but
+`KeepAlive` does not use it — deactivating only sets `instance.isDeactivated`. So the deep source
+watcher still runs, an edit made while the component is off screen is queued at once, the clock
+sends it, and the flush on page-hide reaches it too. Only a real unmount stops any of it, and that
+is `onScopeDispose`. No behaviour changed here; what changed is that it is now pinned and stated.
+
+### Fixed — in the checks, not the library
+
+- **`dist-check.mjs`'s fake DOM only stubbed `document`.** `pagehide`/`pageshow` are window events,
+  so the check started throwing on a `window` that was `globalThis` with no `addEventListener` —
+  correctly, because it was not a faithful fake. It now builds a small dispatching target for each
+  global and fires `pagehide` for real, which turns it into the only check that proves the unload
+  flush works through the **built** artifacts and the real package resolution.
+
+### Notes
+
+- **`npm install` needs `@ozjsey/write-behind` to be on the registry.** Until it is, `npm run
+  link:core` symlinks the sibling checkout and rebuilds it; the unit suites resolve the engine from
+  its source through a vitest alias and need nothing.
+
+[0.2.0]: https://github.com/ozJSey/vue-write-behind/releases/tag/v0.2.0
+
 ## [0.1.1] — 2026-09-13
 
 **Upgrade from 0.1.0. It could lose a write silently, with nothing on screen to say so.**

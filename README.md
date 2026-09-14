@@ -24,10 +24,15 @@ The rest, each against a real (fake) server you can break from the card:
 npm install @ozjsey/vue-write-behind
 ```
 
-> **On 0.1.0? Upgrade to 0.1.1.** Calling `discard(key)` while that key's save was in flight let a
+> **On 0.1.0? Upgrade.** Calling `discard(key)` while that key's save was in flight let a
 > second, concurrent request go out for it. If the two landed out of order the server was left
 > holding the **older** value — with the newer one on screen, `pending` empty and no error anywhere.
-> See [`CHANGELOG.md`](./CHANGELOG.md).
+> Fixed in 0.1.1. See [`CHANGELOG.md`](./CHANGELOG.md).
+
+Since 0.2.0 the engine lives in [`@ozjsey/write-behind`](https://www.npmjs.com/package/@ozjsey/write-behind)
+— zero dependencies, no framework — and this package is the adapter that wires it to Vue's
+reactivity. It installs automatically; nothing below changed because of it. Not using Vue? Install
+the engine directly and call `sync()` yourself.
 
 ```vue
 <script setup lang="ts">
@@ -61,7 +66,7 @@ The bare form above is the configuration this library recommends — options exi
 | The response | **ignored** — there is no opt-in | applying it is the "cell jumps while you type" bug |
 | Failure | retry forever, per-key backoff 1 → 2 → 4 → 8 → 16 → 30 s (capped), timed to the millisecond rather than rounded up to the next tick, always re-sending the **current** value | silently dropping a user's edit is the one unacceptable outcome |
 | Batch size | unlimited | |
-| Leaving the page | flush on `visibilitychange → hidden` | best-effort — see below |
+| Leaving the page | flush on `visibilitychange → hidden` **and** `pagehide`, de-duplicated into one | a refresh and an iOS swipe-away are not the same event — [see below](#surviving-a-page-refresh--keepalive) |
 | Lifetime | stops on scope dispose, never starts on the server | |
 
 ## The store it returns
@@ -75,7 +80,7 @@ Reactive and already assembled — read it straight in a template.
 | `failed` | `{ key, error, attempts, retryAt }` per failing key — latest error only. `retryAt` is never in the past, and is `undefined` only when no automatic attempt is scheduled (`retry: false`) |
 | `isSyncing` | `true` while anything is in flight |
 | `set(key, value)` | write local state **and** queue it, unconditionally |
-| `flush()` | send every pending key now — ignoring the debounce, the backoff and `retry: false`'s parked state. The one thing it cannot send is a key already on the wire. Resolving is not proof of success: read `pending` / `failed` afterwards |
+| `flush()` | send every pending key now — ignoring the debounce, the backoff and `retry: false`'s parked state. The one thing it cannot send is a key already on the wire. Resolving is not proof of success: read `pending` / `failed` afterwards. `flush('unload')` tells the writer the page is going away |
 | `retry(key?)` | clear the backoff and the recorded failure for one key, or all |
 | `discard(key)` | drop a pending write. **The only operation here that loses one.** A request already on the wire cannot be recalled — the key is held back until it answers |
 
@@ -92,6 +97,7 @@ const outbox = useWriteBehind(cells, {
   flushOnHidden: true,
   keys: ['A1', 'A2'],          // or (key) => key.startsWith('draft:')
   equals: (a, b) => a === b,
+  autoFlush: true,
 })
 ```
 
@@ -106,8 +112,14 @@ const outbox = useWriteBehind(cells, {
 - **`retry: false`** — stop retrying after a failure. The key is **not** dropped: it stays in
   `pending`, stays listed in `failed` with `retryAt: undefined`, and goes out again on the next
   edit, on `retry(key)`, or on `flush()` — including the automatic flush when the tab is hidden.
+- **`flushOnHidden`** — flush when the page goes away, on either signal the browser gives
+  (`visibilitychange → hidden`, `pagehide`), de-duplicated into one flush.
+  [Surviving a page refresh](#surviving-a-page-refresh--keepalive) is the whole story.
 - **`keys`** — narrows what the source watcher picks up. `set()` is explicit and ignores it.
 - **`equals`** — change detection, `Object.is` by default. See the precondition below.
+- **`autoFlush: false`** — do not run the flush clock at all; nothing goes out until you call
+  `flush()`. Edits still queue and `pending` still reports them. New in 0.2.0, and already forced
+  during a server render — see the SSR note below.
 
 ### A batch endpoint
 
@@ -152,6 +164,90 @@ lose a write, and you have to call it. Two cards for this pair:
 [type with the server down](https://ozjsey.github.io/npm-portfolio-playground/#vue-write-behind/failure-and-retry), and
 [three near misses that still do not lose a write](https://ozjsey.github.io/npm-portfolio-playground/#vue-write-behind/discard).
 
+## Surviving a page refresh — `keepalive`
+
+When the page goes away this composable flushes: `visibilitychange → hidden` **and** `pagehide`,
+de-duplicated so a browser firing both sends one request rather than two. Taking both matters —
+`visibilitychange` is backgrounding, `pagehide` is a refresh, a same-tab navigation or a tab close,
+and on iOS Safari a swipe-away fires `pagehide` and nothing else. `beforeunload` is deliberately not
+used: mobile browsers routinely discard a page without ever firing it, and registering one costs the
+back/forward cache.
+
+That flush is **forced** — it ignores the debounce clock, the retry backoff and `retry: false` — so
+it carries the character typed 200 ms before the tab closed.
+
+What it cannot do is make the request outlive the page. Only the request can do that, and the
+request is yours. So your writer is told which kind of send this is:
+
+```ts
+useWriteBehind(cells, (value, key, { final }) =>
+  fetch(`/cell/${key}`, {
+    method: 'PUT',
+    body: JSON.stringify(value),
+    keepalive: final,        // the browser finishes this one after the page is gone
+  }),
+)
+```
+
+`{ reason, final, attempt }` is a `WriteBehindAttempt`. A two-argument writer stays a perfectly good
+writer — the parameter is additive and every existing one keeps working.
+
+| | |
+|---|---|
+| `reason` | `'scheduled'` (the clock), `'manual'` (your `flush()`), `'unload'` (the page is going away) |
+| `final` | `true` exactly when `reason` is `'unload'`. The only question most writers ask |
+| `attempt` | `1` on the first try for this key, `2` after one failure. For an idempotency key, or your own give-up rule. A batch writer gets the highest number in its batch |
+
+### `sendBeacon`, for a POST endpoint
+
+```ts
+useWriteBehind(cells, {
+  flush: (entries, { final }) => {
+    const body = JSON.stringify(Object.fromEntries(entries))
+    // `true` means the browser accepted it for delivery — not that it arrived.
+    if (final && navigator.sendBeacon('/cells', new Blob([body], { type: 'application/json' }))) {
+      return
+    }
+    return fetch('/cells', { method: 'POST', body, keepalive: final })
+  },
+})
+```
+
+### The five things that bite, and bite silently
+
+- **64 KiB, for the whole page.** `fetch(…, { keepalive: true })` is capped at 64 KiB across *all*
+  in-flight keepalive requests from the page. Over that, the request is **rejected** — not queued,
+  not truncated. `navigator.sendBeacon` shares the same budget and returns `false` instead.
+- **Batch at unload.** A per-key writer firing 200 keepalive requests as the page dies will lose
+  most of them to that budget. One batched request carrying every due key is the shape that fits, so
+  `flush` (the batch writer) is the better unload path — and it is why the batch writer gets the
+  same `final` flag.
+- **There are no retries after `final`.** The page is gone; there is no backoff left to run and no
+  clock to run it on. `final: true` means *this is the only chance*. A writer that normally throws
+  and lets the retry curve sort it out should not do that here — set `keepalive`, keep the body
+  small, and send.
+- **`final` is `true` for a backgrounded tab too.** No browser signal separates "hidden for a second"
+  from "gone" (iOS Safari fires `pagehide` for both), so this library assumes the worse of the two.
+  If your payloads can approach 64 KiB, gate on size rather than on `final` alone —
+  `keepalive: final && body.length < 60_000` — because a rejected keepalive request loses the write
+  that a plain one would have delivered.
+- **It is still best-effort.** The browser may freeze the page before the request leaves the socket,
+  and `keepalive` does not make delivery observable — nothing tells you whether it landed. `pending`
+  is exposed so an app that must not lose the write can warn the user *before* they leave.
+
+### Your own unload signal
+
+`outbox.flush('unload')` says the same thing by hand — the escape hatch for a signal this library
+refuses to listen to on your behalf:
+
+```ts
+router.beforeEach(() => outbox.flush('unload'))
+```
+
+All of this lives in [`@ozjsey/write-behind`](https://www.npmjs.com/package/@ozjsey/write-behind),
+the engine underneath: there is one implementation of it, and this package inherits it by
+delegating rather than by keeping a copy.
+
 ## Preconditions — read these, they are not assumptions
 
 - **Keys must be independent.** Writes go out in parallel, in no particular order, last-write-wins
@@ -160,9 +256,14 @@ lose a write, and you have to call it. Two cards for this pair:
   Replace the object (`cells.A1 = { ...cells.A1, text }`), pass your own `equals`, or call
   `outbox.set('A1', value)` — which always queues. All four outcomes side by side:
   [`equals`, and why in-place mutation is not an edit](https://ozjsey.github.io/npm-portfolio-playground/#vue-write-behind/equals-and-set).
-- **The flush on tab-hidden is best-effort.** `visibilitychange → hidden` is used rather than
-  `beforeunload`, which mobile browsers routinely skip — but the page can still be frozen before
-  the request leaves. `pending` is exposed so your app can *warn* instead of failing silently.
+- **The flush on the way out is best-effort.** Both signals are taken (`visibilitychange → hidden`
+  and `pagehide`) rather than `beforeunload`, which mobile browsers routinely skip — but the page
+  can still be frozen before the request leaves, and only `keepalive` makes a request outlive it.
+  `pending` is exposed so your app can *warn* instead of failing silently.
+- **`<KeepAlive>` changes nothing.** A deactivated component is cached, not disposed: its source
+  watcher still runs, so an edit made while it is off screen is queued at once and goes out on the
+  clock, and the flush on page-hide reaches it too. Only a real unmount stops the outbox. Measured
+  on Vue 3.5 and 3.3 in `keepAlive.test.ts`, which mounts components for real.
 - **A key deleted from the source keeps its queued write.** Losing it silently is exactly what this
   library refuses to do. Call `discard(key)` if you mean it.
 - **Outside an effect scope there is no cleanup.** Called in `setup()` (or any `effectScope`) the
@@ -196,6 +297,8 @@ on day one:
 - **No reading.** It is write-only; nothing here fetches, caches or invalidates.
 - **No ordered operation log and no cross-key transactions.**
 - **No HTTP client, transport or `sendBeacon`.** You pass a function; what it does is your business.
+  What the library *does* do is tell that function when the page is going away, so it can set
+  `keepalive` — see [surviving a page refresh](#surviving-a-page-refresh--keepalive).
 - **No schema and no collections.**
 
 ## Types
@@ -205,12 +308,14 @@ Everything is exported by name — nothing to recreate:
 ```ts
 import type {
   WriteBehind,
+  WriteBehindAttempt,
   WriteBehindBaseOptions,
   WriteBehindBatchOutcome,
   WriteBehindBatchWriter,
   WriteBehindFailure,
   WriteBehindKey,
   WriteBehindOptions,
+  WriteBehindReason,
   WriteBehindRetryOptions,
   WriteBehindSource,
   WriteBehindWriter,
@@ -223,22 +328,24 @@ gives you a `write` whose value is a `number`.
 ## Development
 
 ```bash
-npm test               # vitest: the state machine, the clock, the adapters, the composable
-                       # (jsdom on Vue 3.5 and 3.3, plus an SSR project in node)
+npm test               # vitest: the composable, on Vue 3.5 and 3.3 in jsdom, plus SSR in node.
+                       # The engine's own suites live in ../write-behind
 npm run typecheck      # tsc over source and tests
-npm run build          # tsup → dist/*.min.js + .cjs + .d.ts
+npm run build          # tsup → dist/*.min.js + .cjs + .d.ts (the engine stays external)
 npm run check:dist     # drive the BUILT artifact on real timers — dist goes stale silently
 npm run check:browser  # headless Chrome: type into a real input while a slow server answers,
                        # and read the value back out of the live DOM
+npm run link:core      # symlink + rebuild the sibling engine, until it is on the registry
 ```
 
 `playground.html` is that browser check's page — serve the package directory and open it to try the
 three cards by hand (`npm run check:browser` builds, serves and drives it for you). The claim it
 exists to prove is the one no unit test can make: **the cell does not jump.**
 
-`ARCHITECTURE.md` has the module map, the invariant the split protects, and the three pieces of
-per-key state that are deliberately kept apart. `CHANGELOG.md` is the version history — read
-0.1.1 before staying on 0.1.0.
+`ARCHITECTURE.md` has the module map and the three things this layer decides that the engine
+cannot. The invariant the split protects, the version guard and the three pieces of per-key state
+that are deliberately kept apart are documented in the engine's own `ARCHITECTURE.md`.
+`CHANGELOG.md` is the version history — read 0.1.1 before staying on 0.1.0.
 
 ## License
 

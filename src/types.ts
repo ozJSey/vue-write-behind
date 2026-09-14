@@ -1,13 +1,38 @@
 /**
  * Public types.
  *
- * Leaf module: imports nothing at runtime (the single `import type { Ref }`
- * is erased at compile time), so it can be copied on its own.
+ * Most of them are the engine's and are re-exported unchanged, so a consumer
+ * imports one set of names from one package and never has to reach past this
+ * one. Two are Vue's own and live here:
+ *
+ *   - `WriteBehindSource` — a `ref()` is a source shape the engine cannot know
+ *     about.
+ *   - `WriteBehind` — the reactive store this package returns. It is the
+ *     engine's surface minus the three members Vue answers for you (`sync` is
+ *     the source watcher's job, `subscribe` is what `shallowReactive` replaces,
+ *     and `dispose` belongs to the effect scope).
+ *
+ * Leaf module: every import here is erased at compile time.
  */
 import type { Ref } from 'vue'
+import type {
+  WriteBehindFailure,
+  WriteBehindKey,
+  WriteBehindReason,
+} from '@ozjsey/write-behind'
 
-/** Outbox keys are plain strings — the keys of the reactive record you pass in. */
-export type WriteBehindKey = string
+export type {
+  WriteBehindAttempt,
+  WriteBehindBaseOptions,
+  WriteBehindBatchOutcome,
+  WriteBehindBatchWriter,
+  WriteBehindFailure,
+  WriteBehindKey,
+  WriteBehindOptions,
+  WriteBehindReason,
+  WriteBehindRetryOptions,
+  WriteBehindWriter,
+} from '@ozjsey/write-behind'
 
 /**
  * The record whose keys are written back. Either a `reactive()` object or a
@@ -19,113 +44,6 @@ export type WriteBehindKey = string
  * (that needs an ordered operation log — see the README's refuse list).
  */
 export type WriteBehindSource<T> = Record<WriteBehindKey, T> | Ref<Record<WriteBehindKey, T>>
-
-/**
- * Per-key writer — the common form.
- *
- * Called with the value read out of the outbox **at send time**, never a value
- * captured when the edit happened. Reject (or throw) to fail the key; the
- * return value is otherwise ignored on purpose — the server's reply never
- * touches local state.
- */
-export type WriteBehindWriter<T> = (value: T, key: WriteBehindKey) => unknown
-
-/** What a batch writer may resolve to in order to fail part of the batch. */
-export interface WriteBehindBatchOutcome {
-  /** Keys the server did not accept. Everything else in the batch is treated as written. */
-  failed?: readonly WriteBehindKey[]
-}
-
-/**
- * Batch writer — one call for every due key.
- *
- * Throw/reject and the **whole batch** stays pending. Resolve with
- * `{ failed: [...] }` to fail part of it. Resolve with anything else (including
- * `undefined`) and the whole batch is treated as written.
- */
-export type WriteBehindBatchWriter<T> = (
-  entries: [WriteBehindKey, T][],
-) => WriteBehindBatchOutcome | void | Promise<WriteBehindBatchOutcome | void>
-
-/** Per-key exponential backoff. Defaults produce 1s → 2 → 4 → 8 → 16 → 30s, capped. */
-export interface WriteBehindRetryOptions {
-  /** Delay after the first failure, in ms. Default `1000`. */
-  initialDelay?: number
-  /** Ceiling for the delay, in ms. Default `30000`. */
-  maxDelay?: number
-  /** Multiplier applied per consecutive failure. Default `2`. */
-  factor?: number
-}
-
-/** One key's latest failure. Only the newest error per key is kept. */
-export interface WriteBehindFailure {
-  key: WriteBehindKey
-  /** Whatever the writer rejected with. */
-  error: unknown
-  /** Consecutive failures — resets on success, on `retry()`, and on `discard()`. */
-  attempts: number
-  /**
-   * Epoch ms of the next automatic attempt. **Never in the past**: a key that
-   * is due now (or whose retry is already on the wire) reports the current
-   * time, so `retryAt - Date.now()` is a countdown you can render as-is.
-   *
-   * `undefined` means no automatic attempt is scheduled at all — the key failed
-   * under `retry: false` and needs an edit, an explicit `retry(key)`, or a
-   * `flush()`.
-   */
-  retryAt: number | undefined
-}
-
-/** Options shared by both writer shapes. Every one of them is an opt-*out*. */
-export interface WriteBehindBaseOptions<T> {
-  /** Flush cadence in ms. Default `1000`. The timer only runs while work is queued. */
-  interval?: number
-  /**
-   * Per-key quiet period in ms before a key becomes eligible. Default `0`
-   * (the `interval` already coalesces a burst of edits into one write).
-   *
-   * It is the consumer's clock and only `set`/an edit moves it: a response
-   * landing mid-typing cannot cancel it, a failure cannot shorten it, and
-   * `retry()` does not cut it short. It is tracked separately from the retry
-   * backoff, so neither can shorten the other; a key waits for whichever is
-   * later.
-   */
-  debounce?: number
-  /**
-   * Retry policy, or `false` to stop retrying a key after a failure. Retrying
-   * is the default because dropping a user's edit is the one unacceptable
-   * outcome. With `false` the key stays pending and listed in `failed` — it is
-   * never discarded — until the next edit or an explicit `retry(key)`.
-   */
-  retry?: WriteBehindRetryOptions | false
-  /**
-   * Flush when the tab is hidden (`visibilitychange`). Default `true`.
-   * Best-effort only: the browser may kill the page before the request leaves.
-   */
-  flushOnHidden?: boolean
-  /**
-   * Narrows what the source watcher picks up. An allow-list or a predicate.
-   * Default: every key. `set()` is explicit and ignores this filter.
-   */
-  keys?: readonly WriteBehindKey[] | ((key: WriteBehindKey) => boolean)
-  /**
-   * Change detection for a key's value. Default `Object.is`.
-   *
-   * With the default, mutating an object value **in place** is not an edit —
-   * replace the object, or call `set(key, value)`.
-   */
-  equals?: (a: T, b: T) => boolean
-}
-
-/**
- * Options for `useWriteBehind`. Exactly one writer: `write` (per key) or
- * `flush` (batched).
- */
-export type WriteBehindOptions<T> = WriteBehindBaseOptions<T> &
-  (
-    | { write: WriteBehindWriter<T>; flush?: undefined }
-    | { write?: undefined; flush: WriteBehindBatchWriter<T> }
-  )
 
 /**
  * The reactive store `useWriteBehind` returns. Read the fields straight in a
@@ -161,8 +79,13 @@ export interface WriteBehind<T> {
    * Resolves when the requests it started have settled — it never rejects, and
    * resolving is not proof of success. Read `pending` / `failed` afterwards to
    * see what landed; keys edited *during* the flight are still pending.
+   *
+   * Pass `'unload'` to tell the writer the page is going away, exactly as the
+   * automatic flush on `visibilitychange`/`pagehide` does — the escape hatch
+   * for a signal the engine refuses to listen to itself, such as a router
+   * leave guard.
    */
-  flush: () => Promise<void>
+  flush: (reason?: Exclude<WriteBehindReason, 'scheduled'>) => Promise<void>
   /**
    * Clear the retry backoff (and the recorded failure) for one key, or all of
    * them, so they go out on the next tick. Revives a key parked by

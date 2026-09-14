@@ -1,16 +1,16 @@
 {
   "name": "@ozjsey/vue-write-behind",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Write-behind cache for Vue 3 — local state stays authoritative, the server's reply is discarded on purpose, and a failed save never rolls back or drops what the user typed",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ozJSey/vue-write-behind.git"
+    "url": "git+https://github.com/ozjsey/vue-write-behind.git"
   },
-  "homepage": "https://github.com/ozJSey/vue-write-behind#readme",
+  "homepage": "https://github.com/ozjsey/vue-write-behind#readme",
   "bugs": {
-    "url": "https://github.com/ozJSey/vue-write-behind/issues"
+    "url": "https://github.com/ozjsey/vue-write-behind/issues"
   },
   "type": "module",
   "sideEffects": false,
@@ -34,10 +34,11 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup vueWriteBehind.ts --format esm,cjs --minify --sourcemap --dts --out-dir dist --clean && mv dist/vueWriteBehind.js dist/vueWriteBehind.min.js && mv dist/vueWriteBehind.js.map dist/vueWriteBehind.min.js.map && mv dist/vueWriteBehind.cjs dist/vueWriteBehind.min.cjs && mv dist/vueWriteBehind.cjs.map dist/vueWriteBehind.min.cjs.map && mv dist/vueWriteBehind.d.cts dist/vueWriteBehind.min.d.cts && node -e \"const fs=require('fs');for(const f of ['vueWriteBehind.min.js','vueWriteBehind.min.cjs']){const p='dist/'+f;let s=fs.readFileSync(p,'utf8');s=s.replace(/\\/\\/# sourceMappingURL=vueWriteBehind\\.(js|cjs)\\.map/, '//# sourceMappingURL='+f+'.map');fs.writeFileSync(p,s);}\"",
+    "build": "tsup vueWriteBehind.ts --external @ozjsey/write-behind --format esm,cjs --minify --sourcemap --dts --out-dir dist --clean && mv dist/vueWriteBehind.js dist/vueWriteBehind.min.js && mv dist/vueWriteBehind.js.map dist/vueWriteBehind.min.js.map && mv dist/vueWriteBehind.cjs dist/vueWriteBehind.min.cjs && mv dist/vueWriteBehind.cjs.map dist/vueWriteBehind.min.cjs.map && mv dist/vueWriteBehind.d.cts dist/vueWriteBehind.min.d.cts && node -e \"const fs=require('fs');for(const f of ['vueWriteBehind.min.js','vueWriteBehind.min.cjs']){const p='dist/'+f;let s=fs.readFileSync(p,'utf8');s=s.replace(/\\/\\/# sourceMappingURL=vueWriteBehind\\.(js|cjs)\\.map/, '//# sourceMappingURL='+f+'.map');fs.writeFileSync(p,s);}\"",
     "test": "vitest run",
-    "check:dist": "npm run build && node dist-check.mjs",
-    "check:browser": "npm run build && node scripts/browser-check.mjs",
+    "link:core": "node scripts/link-core.mjs",
+    "check:dist": "npm run link:core && npm run build && node dist-check.mjs",
+    "check:browser": "npm run link:core && npm run build && node scripts/browser-check.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "npm run build"
   },
@@ -59,6 +60,9 @@
     "dirty-tracking",
     "sync"
   ],
+  "dependencies": {
+    "@ozjsey/write-behind": "^0.1.0"
+  },
   "peerDependencies": {
     "vue": "^3.0.0"
   },

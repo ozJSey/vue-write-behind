@@ -6,10 +6,13 @@
  * suite here imports source — so this is the only thing that fails when the
  * tarball and the source disagree. Run it with `npm run check:dist`.
  *
- * Three passes, because the correct behaviour differs by environment:
+ * Four passes, because the correct behaviour differs by environment:
  *   1. bare Node (no `window`, no `document`) — the SSR guard must keep the
  *      timer from ever starting;
  *   2. with the two globals the client path looks for — the full cycle;
+ *   2b. the flush on page-hide, fired for real through a dispatching fake DOM:
+ *      `pagehide` sends, the writer is told it is `final`, and a
+ *      `visibilitychange` behind it does not send a second request;
  *   3. the 0.1.0 data-loss regression: discard a key while its request is out,
  *      type again, and check what the SERVER ends up holding.
  *
@@ -56,13 +59,23 @@ const waitUntil = async (predicate, timeout = 5000, step = 5) => {
 
 // ------------------------------------------------------------- pass 2: client
 // The minimum DOM the client path looks for: `isServer()` checks both globals,
-// and the tab-hidden flush subscribes to `document`.
-globalThis.window = globalThis
-globalThis.document = {
-  visibilityState: 'visible',
-  addEventListener: () => {},
-  removeEventListener: () => {},
+// and the flush on page-hide subscribes to `visibilitychange` on `document`
+// **and** to `pagehide`/`pageshow` on `window`. A fake that only answers the
+// first would hide a half-wired listener, so this one dispatches for real.
+const fakeTarget = (extra = {}) => {
+  const bag = new Map()
+  return {
+    ...extra,
+    addEventListener: (type, fn) => bag.set(type, [...(bag.get(type) ?? []), fn]),
+    removeEventListener: (type, fn) =>
+      bag.set(type, (bag.get(type) ?? []).filter((listener) => listener !== fn)),
+    dispatch: (type) => {
+      for (const fn of bag.get(type) ?? []) fn()
+    },
+  }
 }
+globalThis.window = fakeTarget()
+globalThis.document = fakeTarget({ visibilityState: 'visible' })
 
 {
   const cells = reactive({ A1: 'from-server' })
@@ -97,6 +110,46 @@ globalThis.document = {
   check('the response never touched local state', cells.A1 === 'typed-while-in-flight')
   check('everything settled', outbox.pending.length === 0 && outbox.failed.length === 0)
   scope.stop()
+}
+
+// ------------------------------------------ pass 2b: the flush on page-hide
+// The engine's listeners, reached through the composable — this package adds
+// none of its own, so the only thing that can break here is the delegation.
+{
+  const cells = reactive({ A1: 'v0' })
+  const sent = []
+  const scope = effectScope()
+  const outbox = scope.run(() =>
+    useWriteBehind(cells, {
+      write: (value, key, attempt) => sent.push({ value, key, attempt }),
+      interval: 30000, // nothing leaves on the clock during this pass
+    }),
+  )
+
+  cells.A1 = 'typed-just-before-the-refresh'
+  await nextTick()
+  check('nothing went out on the clock', sent.length === 0)
+
+  globalThis.window.dispatch('pagehide')
+  await waitUntil(() => sent.length > 0)
+
+  check('pagehide flushed it', sent[0]?.value === 'typed-just-before-the-refresh', JSON.stringify(sent))
+  check(
+    'and the writer was told the page is going away',
+    sent[0]?.attempt?.reason === 'unload' && sent[0]?.attempt?.final === true,
+    JSON.stringify(sent[0]?.attempt),
+  )
+
+  // Both events for one teardown is the common desktop case; it must not send
+  // a second request.
+  globalThis.document.visibilityState = 'hidden'
+  globalThis.document.dispatch('visibilitychange')
+  await sleep(50)
+  check('visibilitychange after it does not send a second', sent.length === 1, `${sent.length} sent`)
+
+  check('nothing is left pending', outbox.pending.length === 0)
+  scope.stop()
+  globalThis.document.visibilityState = 'visible'
 }
 
 // ------------------------------------------- pass 3: discard() cannot lose a write

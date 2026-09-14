@@ -5,12 +5,14 @@
 export { useWriteBehind } from './useWriteBehind'
 export type {
   WriteBehind,
+  WriteBehindAttempt,
   WriteBehindBaseOptions,
   WriteBehindBatchOutcome,
   WriteBehindBatchWriter,
   WriteBehindFailure,
   WriteBehindKey,
   WriteBehindOptions,
+  WriteBehindReason,
   WriteBehindRetryOptions,
   WriteBehindSource,
   WriteBehindWriter,

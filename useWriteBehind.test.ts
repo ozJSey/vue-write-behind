@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick, reactive, ref, watch, watchEffect, type EffectScope } from 'vue'
 import { useWriteBehind } from './src/useWriteBehind'
-import type { WriteBehind } from './src/types'
+import type { WriteBehind, WriteBehindAttempt } from './src/types'
 import type { Deferred } from './test-utils'
 import { deferred, microtasks } from './test-utils'
 
@@ -25,10 +25,15 @@ function inScope<R extends object>(factory: () => R): { scope: EffectScope; valu
 
 /** A writer whose every call the test settles individually. */
 function fakeNetwork() {
-  const calls: { value: unknown; key: string; at: number }[] = []
+  const calls: {
+    value: unknown
+    key: string
+    at: number
+    attempt: WriteBehindAttempt
+  }[] = []
   const gates: Deferred<void>[] = []
-  const write = (value: unknown, key: string): Promise<void> => {
-    calls.push({ value, key, at: Date.now() })
+  const write = (value: unknown, key: string, attempt: WriteBehindAttempt): Promise<void> => {
+    calls.push({ value, key, at: Date.now(), attempt })
     const gate = deferred()
     gates.push(gate)
     return gate.promise
@@ -40,6 +45,8 @@ function fakeNetwork() {
     values: () => calls.map((call) => call.value),
     keys: () => calls.map((call) => call.key),
     times: () => calls.map((call) => call.at),
+    reasons: () => calls.map((call) => call.attempt.reason),
+    finals: () => calls.map((call) => call.attempt.final),
   }
 }
 
@@ -320,8 +327,12 @@ describe('failure never rolls back and never drops a write', () => {
   it('backs off 1 → 2 → 4 → 8 → 16 → 30 → 30s', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'foo' })
     const net = fakeNetwork()
-    const failEverything = (value: unknown, key: string): Promise<void> => {
-      const promise = net.write(value, key)
+    const failEverything = (
+      value: unknown,
+      key: string,
+      attempt: WriteBehindAttempt,
+    ): Promise<void> => {
+      const promise = net.write(value, key, attempt)
       net.gates[net.gates.length - 1]?.reject(new Error('503'))
       return promise
     }
@@ -355,8 +366,12 @@ describe('failure never rolls back and never drops a write', () => {
   it('does not fire a request per keystroke while an endpoint is failing', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'foo' })
     const net = fakeNetwork()
-    const failEverything = (value: unknown, key: string): Promise<void> => {
-      const promise = net.write(value, key)
+    const failEverything = (
+      value: unknown,
+      key: string,
+      attempt: WriteBehindAttempt,
+    ): Promise<void> => {
+      const promise = net.write(value, key, attempt)
       net.gates[net.gates.length - 1]?.reject(new Error('503'))
       return promise
     }
@@ -387,8 +402,12 @@ describe('failure never rolls back and never drops a write', () => {
   it('honours the retry curve even when the interval is longer than the delay', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'foo' })
     const net = fakeNetwork()
-    const failEverything = (value: unknown, key: string): Promise<void> => {
-      const promise = net.write(value, key)
+    const failEverything = (
+      value: unknown,
+      key: string,
+      attempt: WriteBehindAttempt,
+    ): Promise<void> => {
+      const promise = net.write(value, key, attempt)
       net.gates[net.gates.length - 1]?.reject(new Error('503'))
       return promise
     }
@@ -525,9 +544,9 @@ describe('the store only changes when the state does', () => {
   it('does not re-notify a failed watcher while an unrelated key churns', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'a', B2: 'b' })
     const net = fakeNetwork()
-    const write = (value: unknown, key: string): Promise<void> => {
+    const write = (value: unknown, key: string, attempt: WriteBehindAttempt): Promise<void> => {
       if (key === 'A1') return Promise.reject(new Error('503'))
-      return net.write(value, key)
+      return net.write(value, key, attempt)
     }
     const { value: outbox } = inScope(() =>
       // A backoff far longer than the run, so A1's failure record is genuinely
@@ -909,7 +928,12 @@ describe('options', () => {
   })
 })
 
-describe('flush on tab hidden', () => {
+/**
+ * Every one of these behaviours belongs to the engine, and none of it is
+ * reimplemented here — that is the point of the split, so what these cases
+ * prove is that the composable inherits it rather than intercepting it.
+ */
+describe('flush when the page goes away', () => {
   const hide = async (): Promise<void> => {
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
     document.dispatchEvent(new Event('visibilitychange'))
@@ -917,6 +941,76 @@ describe('flush on tab hidden', () => {
   }
 
   afterEach(() => vi.restoreAllMocks())
+
+  it('flushes on pagehide too — a refresh, or an iOS swipe-away', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'edited'
+    await nextTick()
+    window.dispatchEvent(new Event('pagehide'))
+    await microtasks()
+
+    expect(net.values()).toEqual(['edited'])
+  })
+
+  it('tells the writer the page is going away, so it can set keepalive', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'edited'
+    await nextTick()
+    await hide()
+
+    expect(net.reasons()).toEqual(['unload'])
+    expect(net.finals()).toEqual([true])
+  })
+
+  it("flush('unload') says the same thing by hand", async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() =>
+      useWriteBehind(cells, { write: net.write, flushOnHidden: false }),
+    )
+
+    cells.A1 = 'edited'
+    await nextTick()
+    void outbox.flush('unload')
+    await microtasks()
+
+    expect(net.reasons()).toEqual(['unload'])
+    expect(net.finals()).toEqual([true])
+  })
+
+  it('calls an ordinary flush() manual', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'edited'
+    await nextTick()
+    void outbox.flush()
+    await microtasks()
+
+    expect(net.reasons()).toEqual(['manual'])
+    expect(net.finals()).toEqual([false])
+  })
+
+  it('drops the pagehide listener with the scope', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    const { scope } = inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'edited'
+    await nextTick()
+    scope.stop()
+    window.dispatchEvent(new Event('pagehide'))
+    await microtasks()
+
+    expect(net.calls).toEqual([])
+  })
 
   it('flushes what is pending, without waiting for the interval', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'foo' })

@@ -9,12 +9,14 @@
 export { useWriteBehind } from './src'
 export type {
   WriteBehind,
+  WriteBehindAttempt,
   WriteBehindBaseOptions,
   WriteBehindBatchOutcome,
   WriteBehindBatchWriter,
   WriteBehindFailure,
   WriteBehindKey,
   WriteBehindOptions,
+  WriteBehindReason,
   WriteBehindRetryOptions,
   WriteBehindSource,
   WriteBehindWriter,

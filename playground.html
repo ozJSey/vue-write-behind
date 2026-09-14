@@ -132,14 +132,16 @@
 <script type="importmap">
 {
   "imports": {
-    "vue": "./node_modules/vue/dist/vue.esm-browser.js"
+    "vue": "./node_modules/vue/dist/vue.esm-browser.js",
+    "@ozjsey/write-behind": "./node_modules/@ozjsey/write-behind/dist/writeBehind.min.js"
   }
 }
 </script>
 <script type="module">
-// Swap the import map above for "https://unpkg.com/vue@3/dist/vue.esm-browser.js" if you are
-// running this page outside the repo. Either way it must be served over http — ES modules do
-// not load over file://.
+// Swap the import map above for "https://unpkg.com/vue@3/dist/vue.esm-browser.js" and
+// "https://unpkg.com/@ozjsey/write-behind" if you are running this page outside the repo — the
+// dist entry imports the engine by bare specifier, so the browser needs both names. Either way
+// it must be served over http — ES modules do not load over file://.
 import { createApp, reactive, ref } from 'vue'
 import { useWriteBehind } from './dist/vueWriteBehind.min.js'
 
