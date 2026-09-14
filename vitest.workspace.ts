@@ -26,19 +26,25 @@ import { fileURLToPath } from 'node:url'
  */
 
 /**
- * Resolve the engine from its **source**, not from `node_modules/…/dist`.
- * `dist/` in this portfolio has gone stale silently three times, and a test run
- * reading a sibling's last build instead of its working tree is the same trap
- * one package further out. `npm run check:dist` is where the built artifact
- * gets its turn.
+ * The engine is resolved from `node_modules`, like any consumer resolves it.
+ *
+ * This used to alias `@ozjsey/write-behind` to the sibling working tree at
+ * `../write-behind/writeBehind.ts`, to avoid reading a sibling's stale `dist/`
+ * — a trap this portfolio has fallen into three times. That reasoning held
+ * while the engine was unpublished and the two moved in lockstep.
+ *
+ * It does not hold now. The engine is a published dependency pinned by version
+ * and integrity hash, so there is no sibling build to go stale — and the alias
+ * had become actively harmful in two ways. It made these suites prove something
+ * about the working tree rather than about the package consumers install; and
+ * it resolved a path that exists only in this one workspace, so the suites
+ * could not run anywhere else. CI checks out this repo alone and every suite
+ * failed with "Failed to resolve import '@ozjsey/write-behind'", while the same
+ * suites passed locally — the sibling was simply sitting there.
  */
-const writeBehind = {
-  '@ozjsey/write-behind': fileURLToPath(new URL('../write-behind/writeBehind.ts', import.meta.url)),
-}
 
 export default defineWorkspace([
   {
-    resolve: { alias: writeBehind },
     test: {
       name: 'vue-3.5',
       environment: 'jsdom',
@@ -48,7 +54,6 @@ export default defineWorkspace([
   {
     resolve: {
       alias: {
-        ...writeBehind,
         vue: fileURLToPath(new URL('./node_modules/vue3_3/dist/vue.esm-bundler.js', import.meta.url)),
       },
     },
@@ -59,7 +64,6 @@ export default defineWorkspace([
     },
   },
   {
-    resolve: { alias: writeBehind },
     test: {
       name: 'ssr-node',
       environment: 'node',
