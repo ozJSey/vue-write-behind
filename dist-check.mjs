@@ -1,22 +1,37 @@
 /**
- * The consumer's view: import the BUILT artifact (not `src/`) and drive one
- * real cycle on real timers.
+ * The consumer's view: import the BUILT artifact (not `src/`) and drive real
+ * cycles on real timers.
  *
  * `dist/` in this repo has gone stale silently three times, and every unit
  * suite here imports source — so this is the only thing that fails when the
  * tarball and the source disagree. Run it with `npm run check:dist`.
  *
- * Two passes, because the correct behaviour differs by environment:
+ * Three passes, because the correct behaviour differs by environment:
  *   1. bare Node (no `window`, no `document`) — the SSR guard must keep the
- *      timer from ever starting, while the edit still queues;
- *   2. with the two globals the client path looks for — the full cycle.
+ *      timer from ever starting;
+ *   2. with the two globals the client path looks for — the full cycle;
+ *   3. the 0.1.0 data-loss regression: discard a key while its request is out,
+ *      type again, and check what the SERVER ends up holding.
+ *
+ * Every wait is a poll with a deadline, never a bare sleep sized to beat an
+ * interval — the same box runs CI.
  */
 import { effectScope, nextTick, reactive } from 'vue'
 import { useWriteBehind } from './dist/vueWriteBehind.min.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const results = []
-const check = (what, ok) => results.push([what, ok])
+const check = (what, ok, detail = '') => results.push([what, ok, detail])
+
+/** Poll until `predicate` holds. Returns false on timeout instead of throwing. */
+const waitUntil = async (predicate, timeout = 5000, step = 5) => {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await sleep(step)
+  }
+  return predicate()
+}
 
 // ---------------------------------------------------------------- pass 1: SSR
 {
@@ -29,10 +44,13 @@ const check = (what, ok) => results.push([what, ok])
 
   cells.A1 = 'edited-server-side'
   await nextTick()
-  await sleep(100)
+  await sleep(150)
 
   check('server-side: no request is made', calls.length === 0)
-  check('server-side: the edit is still queued for the client', outbox.pending.length === 1)
+  // NOT a hand-off: this queue is a closure in this render's effect scope, and
+  // hydration builds a new one. It is here to prove the edit was not dropped
+  // on the floor by the SSR guard, nothing more.
+  check('server-side: the edit is queued, not dropped', outbox.pending.length === 1)
   scope.stop()
 }
 
@@ -54,25 +72,25 @@ globalThis.document = {
     useWriteBehind(cells, {
       write: (value, key) => {
         calls.push([key, value])
-        return sleep(30)
+        return sleep(60)
       },
-      interval: 20,
+      interval: 50,
     }),
   )
 
   cells.A1 = 'a'
   cells.A1 = 'b'
   await nextTick()
-  await sleep(30)
+  await waitUntil(() => outbox.inFlight.length === 1)
   const inFlightDuringWrite = [...outbox.inFlight]
 
   cells.A1 = 'typed-while-in-flight'
-  await sleep(150)
+  await waitUntil(() => outbox.pending.length === 0)
 
   console.log('requests sent :', JSON.stringify(calls))
   console.log('local value   :', cells.A1)
 
-  check('ten edits, one window, one request', calls.length === 2)
+  check('two edits in one window went out as one request', calls.length === 2, `${calls.length} calls`)
   check('the request carried the newest value in its window', calls[0]?.[1] === 'b')
   check('the key was in flight while the request was out', inFlightDuringWrite.length === 1)
   check('the edit made during the flight went out next', calls[1]?.[1] === 'typed-while-in-flight')
@@ -81,7 +99,56 @@ globalThis.document = {
   scope.stop()
 }
 
-for (const [what, ok] of results) console.log(`${ok ? '  ok  ' : ' FAIL '} ${what}`)
+// ------------------------------------------- pass 3: discard() cannot lose a write
+// 0.1.0: discard() deleted the only record that a request was in the air, so
+// the next edit opened a second, concurrent one. The fast second landed first,
+// the slow first landed last, and the server kept the OLDER value — with
+// `pending: []` on screen saying everything was saved.
+{
+  const cells = reactive({ A1: 'v0' })
+  const applied = []
+  let inAir = 0
+  let maxInAir = 0
+  let latency = 400 // the first request is slow, the rest are fast
+  const scope = effectScope()
+  const outbox = scope.run(() =>
+    useWriteBehind(cells, {
+      write: async (value) => {
+        inAir += 1
+        maxInAir = Math.max(maxInAir, inAir)
+        const takes = latency
+        latency = 20
+        await sleep(takes)
+        applied.push(value)
+        inAir -= 1
+      },
+      interval: 50,
+    }),
+  )
+
+  cells.A1 = 'v1-slow'
+  await nextTick()
+  await waitUntil(() => outbox.inFlight.length === 1)
+
+  outbox.discard('A1')
+  cells.A1 = 'v2-fast'
+  await waitUntil(() => outbox.pending.length === 0 && inAir === 0)
+
+  console.log('server applied:', JSON.stringify(applied))
+
+  check('never two requests in the air for one key', maxInAir === 1, `max ${maxInAir}`)
+  check(
+    'the server ends up holding the newest value',
+    applied[applied.length - 1] === 'v2-fast',
+    JSON.stringify(applied),
+  )
+  check('local state is what the user typed', cells.A1 === 'v2-fast')
+  scope.stop()
+}
+
+for (const [what, ok, detail] of results) {
+  console.log(`${ok ? '  ok  ' : ' FAIL '} ${what}${detail ? `  — ${detail}` : ''}`)
+}
 const failed = results.filter(([, ok]) => !ok).length
 console.log(failed === 0 ? '\nDIST CHECK: PASS' : `\nDIST CHECK: ${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

@@ -95,13 +95,81 @@ describe('createScheduler', () => {
     expect(() => scheduler.stop()).not.toThrow()
   })
 
-  it('reports whether it is running', () => {
-    const scheduler = createScheduler({ interval: 1000, onTick: vi.fn() })
+  it('wakeAt() ticks once at a deadline the interval grid would have missed', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
 
-    expect(scheduler.isRunning()).toBe(false)
+    scheduler.wakeAt(250, 0)
+    vi.advanceTimersByTime(249)
+    expect(onTick).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(1)
+    expect(onTick).toHaveBeenCalledTimes(1)
+
+    // One shot, not a second cadence.
+    vi.advanceTimersByTime(5000)
+    expect(onTick).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('wakeAt() replaces a pending wake-up rather than stacking them', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
+
+    scheduler.wakeAt(500, 0)
+    scheduler.wakeAt(300, 0)
+    expect(vi.getTimerCount()).toBe(1)
+
+    vi.advanceTimersByTime(300)
+    expect(onTick).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1000)
+    expect(onTick).toHaveBeenCalledTimes(1)
+  })
+
+  it('wakeAt() re-arming the same deadline does not restart it', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
+
+    scheduler.wakeAt(400, 0)
+    vi.advanceTimersByTime(399)
+    scheduler.wakeAt(400, 399)
+    vi.advanceTimersByTime(1)
+
+    expect(onTick).toHaveBeenCalledTimes(1)
+  })
+
+  it('wakeAt(undefined) cancels a pending wake-up', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
+
+    scheduler.wakeAt(500, 0)
+    scheduler.wakeAt(undefined, 0)
+
+    vi.advanceTimersByTime(5000)
+    expect(onTick).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a deadline already in the past fires on the next turn, not never', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
+
+    scheduler.wakeAt(100, 5000)
+    vi.advanceTimersByTime(0)
+
+    expect(onTick).toHaveBeenCalledTimes(1)
+  })
+
+  it('dispose() clears the interval and the pending wake-up together', () => {
+    const onTick = vi.fn()
+    const scheduler = createScheduler({ interval: 1000, onTick })
+
     scheduler.start()
-    expect(scheduler.isRunning()).toBe(true)
-    scheduler.stop()
-    expect(scheduler.isRunning()).toBe(false)
+    scheduler.wakeAt(500, 0)
+    scheduler.dispose()
+
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(10000)
+    expect(onTick).not.toHaveBeenCalled()
   })
 })

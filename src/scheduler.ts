@@ -1,10 +1,12 @@
 /**
- * The clock — the flush interval and the per-key backoff curve.
+ * The clock — the flush interval, the wake-up for a deadline that falls between
+ * two ticks, and the per-key backoff curve.
  *
  * Deliberately ignorant of writes and keys: it only knows "call this every N
- * ms" and "how long after the n-th failure". The decision to run at all belongs
- * to `useWriteBehind`, which starts it when work is queued and stops it when
- * there is none — an idle app must not hold a timer open.
+ * ms", "call this once at time T" and "how long after the n-th failure". The
+ * decision to run at all belongs to `useWriteBehind`, which starts it when work
+ * is queued and stops it when there is none — an idle app must not hold a timer
+ * open.
  */
 import type { WriteBehindRetryOptions } from './types'
 
@@ -40,12 +42,36 @@ export interface SchedulerConfig {
 export interface Scheduler {
   /** Idempotent: calling it while running keeps the current phase. */
   start: () => void
+  /** Stops the interval. A pending wake-up is left armed — it is a deadline, not a cadence. */
   stop: () => void
-  isRunning: () => boolean
+  /**
+   * Tick once at `deadline` (epoch ms), on top of the interval — that is what
+   * makes a `retry.initialDelay` shorter than `interval` mean anything, instead
+   * of being rounded up to the next tick of the grid. Replaces any pending
+   * wake-up; `undefined` cancels it.
+   */
+  wakeAt: (deadline: number | undefined, now: number) => void
+  /** Clear everything — the interval and any pending wake-up. */
+  dispose: () => void
 }
 
 export function createScheduler({ interval, onTick }: SchedulerConfig): Scheduler {
   let timer: ReturnType<typeof setInterval> | undefined
+  let wake: ReturnType<typeof setTimeout> | undefined
+  let wakeDeadline: number | undefined
+
+  const clearWake = (): void => {
+    if (wake === undefined) return
+    clearTimeout(wake)
+    wake = undefined
+    wakeDeadline = undefined
+  }
+
+  const stop = (): void => {
+    if (timer === undefined) return
+    clearInterval(timer)
+    timer = undefined
+  }
 
   return {
     start: () => {
@@ -54,11 +80,24 @@ export function createScheduler({ interval, onTick }: SchedulerConfig): Schedule
       if (timer !== undefined) return
       timer = setInterval(onTick, interval)
     },
-    stop: () => {
-      if (timer === undefined) return
-      clearInterval(timer)
-      timer = undefined
+    stop,
+    wakeAt: (deadline, now) => {
+      if (deadline === undefined) {
+        clearWake()
+        return
+      }
+      if (wake !== undefined && wakeDeadline === deadline) return
+      clearWake()
+      wakeDeadline = deadline
+      wake = setTimeout(() => {
+        wake = undefined
+        wakeDeadline = undefined
+        onTick()
+      }, Math.max(deadline - now, 0))
     },
-    isRunning: () => timer !== undefined,
+    dispose: () => {
+      stop()
+      clearWake()
+    },
   }
 }

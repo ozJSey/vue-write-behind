@@ -41,7 +41,11 @@ describe('SSR safety — node environment', () => {
     await vi.advanceTimersByTimeAsync(60000)
     expect(calls).toEqual([])
 
-    // …but the edit is still queued, so a client-side hydrate can send it.
+    // The edit sits in this render's outbox and goes nowhere. That queue is a
+    // closure inside the render's effect scope: hydration builds a NEW
+    // composable with a NEW outbox and cannot see it, and nothing here
+    // serialises it. A server-side edit does not reach the client — send it
+    // from the client, or put it in your own payload.
     expect(outbox?.pending).toEqual(['A1'])
     scope.stop()
   })

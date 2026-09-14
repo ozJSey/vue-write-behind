@@ -7,9 +7,10 @@
  * server's reply is discarded on purpose.
  *
  * Per-key writes are independent, so they run in parallel and each key settles
- * the moment its own request returns (`Promise.allSettled` semantics — one
- * rejection can neither block nor fail a sibling). That is safe only because
- * key independence is a stated precondition of the library.
+ * the moment its own request returns: every request is wrapped in its own
+ * `try`/`catch`, so one rejection can neither block nor fail a sibling, and
+ * `flush()` waits with `Promise.allSettled`. That is safe only because key
+ * independence is a stated precondition of the library.
  */
 import type { Outbox, OutboxEntry } from './outbox'
 import type {
@@ -32,7 +33,11 @@ export interface FlusherConfig<T> {
 }
 
 export interface Flusher {
-  /** Send everything due. `force` ignores the debounce and backoff clocks. */
+  /**
+   * Send everything due. `force` ignores the debounce clock, the retry backoff
+   * and `retry: false`'s blocked flag — but never a request already on the
+   * wire, which cannot be recalled.
+   */
   dispatch: (force?: boolean) => void
   /** Force a dispatch and wait for every request currently in the air. */
   flush: () => Promise<void>
@@ -87,7 +92,7 @@ export function createFlusher<T>({ outbox, writer, now }: FlusherConfig<T>): Flu
   }
 
   const dispatch = (force = false): void => {
-    const batch = outbox.take(force ? Number.POSITIVE_INFINITY : now())
+    const batch = outbox.take(now(), force)
     if (batch.length === 0) return
     // The union guarantees exactly one of the two is present.
     if (writer.flush) track(runBatch(writer.flush, batch))
@@ -98,7 +103,9 @@ export function createFlusher<T>({ outbox, writer, now }: FlusherConfig<T>): Flu
     dispatch,
     flush: async () => {
       dispatch(true)
-      await Promise.all([...inAir])
+      // allSettled, not all: `runPerKey`/`runBatch` already absorb every
+      // rejection, and a caller awaiting flush() must not inherit one.
+      await Promise.allSettled([...inAir])
     },
   }
 }

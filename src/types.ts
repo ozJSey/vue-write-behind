@@ -65,9 +65,13 @@ export interface WriteBehindFailure {
   /** Consecutive failures — resets on success, on `retry()`, and on `discard()`. */
   attempts: number
   /**
-   * Epoch ms of the next automatic attempt, or `undefined` when no automatic
-   * attempt is scheduled (`retry: false`) — that key needs an edit or an
-   * explicit `retry(key)`.
+   * Epoch ms of the next automatic attempt. **Never in the past**: a key that
+   * is due now (or whose retry is already on the wire) reports the current
+   * time, so `retryAt - Date.now()` is a countdown you can render as-is.
+   *
+   * `undefined` means no automatic attempt is scheduled at all — the key failed
+   * under `retry: false` and needs an edit, an explicit `retry(key)`, or a
+   * `flush()`.
    */
   retryAt: number | undefined
 }
@@ -79,7 +83,12 @@ export interface WriteBehindBaseOptions<T> {
   /**
    * Per-key quiet period in ms before a key becomes eligible. Default `0`
    * (the `interval` already coalesces a burst of edits into one write).
-   * An edit never *shortens* an active backoff.
+   *
+   * It is the consumer's clock and only `set`/an edit moves it: a response
+   * landing mid-typing cannot cancel it, a failure cannot shorten it, and
+   * `retry()` does not cut it short. It is tracked separately from the retry
+   * backoff, so neither can shorten the other; a key waits for whichever is
+   * later.
    */
   debounce?: number
   /**
@@ -128,7 +137,10 @@ export interface WriteBehind<T> {
    * wire. This is the "you have unsaved work" number.
    */
   readonly pending: readonly WriteBehindKey[]
-  /** The subset of `pending` currently in flight. */
+  /**
+   * The subset of `pending` whose write is currently on the wire. A key held
+   * back by a *discarded* write's request is not in it — see `discard`.
+   */
   readonly inFlight: readonly WriteBehindKey[]
   /** Latest failure per failing key. */
   readonly failed: readonly WriteBehindFailure[]
@@ -142,19 +154,30 @@ export interface WriteBehind<T> {
   set: (key: WriteBehindKey, value: T) => void
   /**
    * Send every pending key that is not already in flight, ignoring the
-   * `debounce` and backoff clocks. Resolves when the requests it started have
-   * settled — keys edited *during* that flight are still pending afterwards.
+   * `debounce` clock, the retry backoff **and** `retry: false`'s parked state.
+   * A key already on the wire is the one thing it cannot send: a request cannot
+   * be recalled, and a second one could land out of order.
+   *
+   * Resolves when the requests it started have settled — it never rejects, and
+   * resolving is not proof of success. Read `pending` / `failed` afterwards to
+   * see what landed; keys edited *during* the flight are still pending.
    */
   flush: () => Promise<void>
   /**
-   * Clear the backoff (and the recorded failure) for one key, or all of them,
-   * so they go out on the next tick. The only way to revive a key that failed
-   * under `retry: false`.
+   * Clear the retry backoff (and the recorded failure) for one key, or all of
+   * them, so they go out on the next tick. Revives a key parked by
+   * `retry: false`. It does not touch a `debounce` quiet period — that belongs
+   * to the user's typing, not to the failure.
    */
   retry: (key?: WriteBehindKey) => void
   /**
    * Drop a key's pending write. **The only operation in this library that
    * loses a write** — nothing else ever discards one.
+   *
+   * A request already on the wire for that key cannot be recalled: its result
+   * is ignored, but the key stays reserved until it answers, so a write queued
+   * in the meantime can never race it and land out of order. While that lasts
+   * the key is in `pending` and not in `inFlight`.
    */
   discard: (key: WriteBehindKey) => void
 }

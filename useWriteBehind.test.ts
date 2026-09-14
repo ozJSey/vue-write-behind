@@ -6,7 +6,7 @@
  * are pinned far more cheaply in `outbox.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, nextTick, reactive, ref, watchEffect, type EffectScope } from 'vue'
+import { effectScope, nextTick, reactive, ref, watch, watchEffect, type EffectScope } from 'vue'
 import { useWriteBehind } from './src/useWriteBehind'
 import type { WriteBehind } from './src/types'
 import type { Deferred } from './test-utils'
@@ -168,9 +168,120 @@ describe('a key edited while its own write is in flight (H1)', () => {
     expect(net.calls).toHaveLength(1)
     expect(outbox.inFlight).toEqual(['A1'])
 
+    // The interval alone cannot prove the guard: with the only key in flight
+    // there is nothing due, so the scheduler is stopped and `take()` is never
+    // reached. Force a dispatch — flush() ignores every clock, so if anything
+    // but the flight itself were holding the key back, a second request would
+    // go out here. (Not awaited: the gate is still open.)
+    void outbox.flush()
+    // …and the tab-hidden path, which is the other forced dispatch.
+    void outbox.flush()
+    await microtasks()
+    expect(net.calls).toHaveLength(1)
+
     net.gates[0]?.resolve()
     await tick()
     expect(net.values()).toEqual(['first', 'fourth'])
+  })
+})
+
+describe('discard() while a request is in flight', () => {
+  /**
+   * The data-loss bug fixed in 0.1.1, driven end to end.
+   *
+   * `discard()` used to delete the outbox entry that was the library's ONLY
+   * record of the request in the air. The next edit therefore opened a SECOND
+   * concurrent request for the same key — and when the first one is slow and the
+   * second is fast, the responses land out of order and the server is left
+   * holding the OLD value while the screen shows the new one. Nothing in the
+   * client says so: no error, no failed entry, `pending` reports `[]`.
+   *
+   * So the assertion is about what the SERVER ends up holding, not about what
+   * the library thinks it did.
+   */
+  it('never opens a second concurrent request, so the server keeps the newest value', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+
+    // A server that applies writes in the order the requests LAND.
+    const applied: string[] = []
+    let serverValue = 'v0'
+    let inAir = 0
+    let maxInAir = 0
+    let latency = 3000 // the first request is slow…
+    const write = (value: string): Promise<void> => {
+      inAir += 1
+      maxInAir = Math.max(maxInAir, inAir)
+      const takes = latency
+      latency = 50 // …every one after it is fast
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          applied.push(value)
+          serverValue = value
+          inAir -= 1
+          resolve()
+        }, takes)
+      })
+    }
+
+    const { value: outbox } = inScope(() => useWriteBehind(cells, write))
+
+    cells.A1 = 'v1-slow'
+    await tick() // t=1000: the slow request is on the wire, landing at t=4000
+    expect(outbox.inFlight).toEqual(['A1'])
+
+    outbox.discard('A1') // the user drops the pending write while it is in the air
+    cells.A1 = 'v2-fast' // …and immediately types again
+
+    await tick(20000)
+
+    // What the SERVER holds is the assertion that matters.
+    expect(serverValue).toBe('v2-fast') // 0.1.0 left 'v1-slow' here
+    expect(applied).toEqual(['v1-slow', 'v2-fast'])
+    expect(maxInAir).toBe(1)
+    expect(cells.A1).toBe('v2-fast')
+    expect(outbox.pending).toEqual([])
+  })
+
+  it('holds the key back until the discarded flight lands, then sends the new value once', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'v1'
+    await tick()
+    outbox.discard('A1')
+    cells.A1 = 'v2'
+    await tick(10000)
+
+    // The request for v1 has not answered yet, so nothing new may go out.
+    expect(net.values()).toEqual(['v1'])
+    expect(outbox.pending).toEqual(['A1'])
+    // The wire is busy with a request nobody owns, so the queued write is
+    // pending but explicitly NOT reported as being saved.
+    expect(outbox.inFlight).toEqual([])
+    expect(outbox.isSyncing).toBe(false)
+
+    net.gates[0]?.resolve() // the discarded flight finally lands
+    await tick()
+
+    expect(net.values()).toEqual(['v1', 'v2'])
+  })
+
+  it('does not record a discarded flight\'s failure against the key that replaced it', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() => useWriteBehind(cells, net.write))
+
+    cells.A1 = 'v1'
+    await tick()
+    outbox.discard('A1')
+    cells.A1 = 'v2'
+    net.gates[0]?.reject(new Error('503 for a write nobody is waiting for'))
+    await microtasks()
+
+    expect(outbox.failed).toEqual([])
+    await tick()
+    expect(net.values()).toEqual(['v1', 'v2'])
   })
 })
 
@@ -249,18 +360,248 @@ describe('failure never rolls back and never drops a write', () => {
       net.gates[net.gates.length - 1]?.reject(new Error('503'))
       return promise
     }
-    inScope(() => useWriteBehind(cells, failEverything))
+    // A backoff five intervals long, so "nothing was sent" cannot be an
+    // accident of the timer grid: with the backoff gone the next 1000ms tick
+    // would send, and this test would see it.
+    inScope(() =>
+      useWriteBehind(cells, { write: failEverything, retry: { initialDelay: 5000 } }),
+    )
 
     cells.A1 = 'a'
-    await tick() // first attempt at t=1000, next due at t=2000
+    await tick() // first attempt at t=1000, next due at t=6000
 
     for (const value of ['b', 'c', 'd', 'e']) {
       cells.A1 = value
       await nextTick()
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1000)
+    }
+    expect(net.calls).toHaveLength(1) // four keystrokes, four ticks, no request
+
+    await vi.advanceTimersByTimeAsync(900) // t=5900
+    expect(net.calls).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(100) // t=6000 — the backoff is up
+    expect(net.values()).toEqual(['a', 'e']) // and it carries the newest value
+  })
+
+  it('honours the retry curve even when the interval is longer than the delay', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'foo' })
+    const net = fakeNetwork()
+    const failEverything = (value: unknown, key: string): Promise<void> => {
+      const promise = net.write(value, key)
+      net.gates[net.gates.length - 1]?.reject(new Error('503'))
+      return promise
+    }
+    inScope(() =>
+      useWriteBehind(cells, {
+        write: failEverything,
+        interval: 500,
+        retry: { initialDelay: 100, factor: 2 },
+      }),
+    )
+
+    cells.A1 = 'edited'
+    await tick(3000)
+
+    const times = net.times()
+    const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0))
+    // 0.1.0 rounded every attempt up to the next 500ms tick, so a curve
+    // shorter than the interval was flat: 500/500/500 instead of 100/200/400.
+    expect(gaps.slice(0, 4)).toEqual([100, 200, 400, 800])
+  })
+})
+
+describe('the debounce is the user\'s, not the network\'s', () => {
+  it('a response landing while the user types does not cancel the quiet period', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    inScope(() => useWriteBehind(cells, { write: net.write, debounce: 2000 }))
+
+    cells.A1 = 'first'
+    await tick(2000) // the quiet period expires and the write goes out at t=2000
+    expect(net.calls).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(303) // t=2303 — a keystroke, request still out
+    cells.A1 = 'second'
+    await nextTick()
+    net.gates[0]?.resolve() // the superseded response lands mid-typing
+    await microtasks()
+
+    // 0.1.0 zeroed the debounce here and shipped the next write ~700ms later.
+    await vi.advanceTimersByTimeAsync(1990) // t=4293, quiet period runs to t=4303
+    expect(net.calls).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(20)
+    expect(net.values()).toEqual(['first', 'second'])
+  })
+
+  it('retry() does not cut short the quiet period of a key being typed into', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() =>
+      useWriteBehind(cells, { write: net.write, debounce: 3000 }),
+    )
+
+    cells.A1 = 'mid-typing'
+    await nextTick()
+    outbox.retry() // clears backoffs; this key has none, it is simply being typed into
+
+    await tick(2900)
+    expect(net.calls).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(100)
+    expect(net.values()).toEqual(['mid-typing'])
+  })
+})
+
+describe('flush() sends what it says it sends', () => {
+  it('sends a key parked by retry: false — the tab-hidden save depends on it', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() =>
+      useWriteBehind(cells, { write: net.write, retry: false }),
+    )
+
+    cells.A1 = 'edited'
+    await tick()
+    net.gates[0]?.reject(new Error('503'))
+    await microtasks()
+    expect(outbox.pending).toEqual(['A1'])
+    expect(outbox.failed[0]?.retryAt).toBeUndefined() // parked forever
+
+    // The server is back. 0.1.0 resolved this promise having sent nothing.
+    const done = outbox.flush()
+    expect(net.values()).toEqual(['edited', 'edited'])
+    net.gates[1]?.resolve()
+    await done
+
+    expect(outbox.pending).toEqual([])
+    expect(outbox.failed).toEqual([])
+  })
+
+  it('the tab-hidden flush revives a parked key too', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    inScope(() => useWriteBehind(cells, { write: net.write, retry: false }))
+
+    cells.A1 = 'edited'
+    await tick()
+    net.gates[0]?.reject(new Error('503'))
+    await microtasks()
+
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await microtasks()
+    vi.restoreAllMocks()
+
+    expect(net.calls).toHaveLength(2)
+  })
+})
+
+describe('the store only changes when the state does', () => {
+  it('does not re-notify a pending watcher through a retry storm', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const failEverything = (): Promise<void> => Promise.reject(new Error('503'))
+    const { value: outbox } = inScope(() => useWriteBehind(cells, failEverything))
+
+    const pendingSeen: string[][] = []
+    inScope(() =>
+      watch(
+        () => outbox.pending,
+        (keys) => pendingSeen.push([...keys]),
+        { flush: 'sync' },
+      ),
+    )
+
+    cells.A1 = 'edited'
+    await tick(20000) // several attempts, all failing
+
+    expect(outbox.failed[0]?.attempts).toBeGreaterThan(2)
+    // `pending` has been ['A1'] since the first keystroke and never moved.
+    // The README's own localStorage recipe writes on every one of these.
+    expect(pendingSeen).toEqual([['A1']])
+  })
+
+  it('does not re-notify a failed watcher while an unrelated key churns', async () => {
+    const cells = reactive<Record<string, string>>({ A1: 'a', B2: 'b' })
+    const net = fakeNetwork()
+    const write = (value: unknown, key: string): Promise<void> => {
+      if (key === 'A1') return Promise.reject(new Error('503'))
+      return net.write(value, key)
+    }
+    const { value: outbox } = inScope(() =>
+      // A backoff far longer than the run, so A1's failure record is genuinely
+      // unchanging: same attempts, same error, same retryAt.
+      useWriteBehind(cells, { write, retry: { initialDelay: 600000 } }),
+    )
+
+    const failedSeen: number[] = []
+    inScope(() =>
+      watch(
+        () => outbox.failed,
+        (failed) => failedSeen.push(failed.length),
+        { flush: 'sync' },
+      ),
+    )
+
+    cells.A1 = 'fails'
+    await tick()
+    expect(outbox.failed).toHaveLength(1)
+
+    // Now churn a healthy sibling: set → take → settle, three transitions each.
+    for (const value of ['b1', 'b2', 'b3']) {
+      cells.B2 = value
+      await tick()
+      net.gates[net.gates.length - 1]?.resolve()
+      await microtasks()
     }
 
-    expect(net.calls).toHaveLength(1)
+    expect(net.calls).toHaveLength(3)
+    expect(failedSeen).toEqual([1]) // one change: A1 failing. Nothing since.
+  })
+
+  it('a backwards clock adjustment does not strand a queued write', async () => {
+    vi.setSystemTime(1_000_000)
+    const cells = reactive<Record<string, string>>({ A1: 'v0' })
+    const net = fakeNetwork()
+    inScope(() => useWriteBehind(cells, { write: net.write, debounce: 5000 }))
+
+    cells.A1 = 'edited' // due at 1_005_000; the scheduler sleeps until then
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(4000)
+
+    // The OS moves the clock back 3s. The pending wake-up still fires on its
+    // original countdown, but by the wall clock the key is not due yet — and
+    // nothing else is going to happen unless that tick re-arms the wake-up.
+    vi.setSystemTime(1_001_000)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(net.calls).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(net.values()).toEqual(['edited'])
+  })
+
+  it('rebuilds the store once for a bulk edit, not once per key', async () => {
+    const cells = reactive<Record<string, string>>({})
+    const net = fakeNetwork()
+    const { value: outbox } = inScope(() => useWriteBehind(cells, net.write))
+
+    let rebuilds = 0
+    inScope(() =>
+      watch(
+        () => outbox.pending,
+        () => {
+          rebuilds += 1
+        },
+        { flush: 'sync' },
+      ),
+    )
+
+    for (let i = 0; i < 200; i += 1) cells[`cell-${i}`] = 'pasted'
+    await nextTick()
+
+    expect(outbox.pending).toHaveLength(200)
+    expect(rebuilds).toBe(1)
   })
 })
 

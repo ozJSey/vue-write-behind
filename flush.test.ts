@@ -44,7 +44,7 @@ describe('flush — per-key writer', () => {
       ['second', 'A1'],
       ['b', 'B2'],
     ])
-    expect(outbox.isEmpty()).toBe(true)
+    expect(outbox.pendingKeys()).toEqual([])
   })
 
   it('does not call the writer when nothing is due', () => {
@@ -65,7 +65,7 @@ describe('flush — per-key writer', () => {
     await microtasks()
 
     expect(outbox.pendingKeys()).toEqual(['A1'])
-    expect(outbox.failures()[0]?.error).toBe(failure)
+    expect(outbox.failures(0)[0]?.error).toBe(failure)
   })
 
   it('catches a writer that throws synchronously', async () => {
@@ -79,10 +79,10 @@ describe('flush — per-key writer', () => {
     expect(() => flusher.dispatch()).not.toThrow()
     await microtasks()
 
-    expect(outbox.failures()[0]?.attempts).toBe(1)
+    expect(outbox.failures(0)[0]?.attempts).toBe(1)
   })
 
-  it('lets one key fail without touching its siblings (allSettled, not all)', async () => {
+  it('lets one key fail without touching its siblings (a try/catch per request)', async () => {
     const net = gates('A1', 'B2')
     const { outbox, flusher } = setup<string>({ write: (_value, key) => net.promiseFor(key) })
 
@@ -95,7 +95,7 @@ describe('flush — per-key writer', () => {
     await microtasks()
 
     expect(outbox.pendingKeys()).toEqual(['A1'])
-    expect(outbox.failures().map((f) => f.key)).toEqual(['A1'])
+    expect(outbox.failures(0).map((f) => f.key)).toEqual(['A1'])
   })
 
   it('settles each key as its own request returns, not when the slowest does', async () => {
@@ -122,7 +122,7 @@ describe('flush — per-key writer', () => {
     flusher.dispatch()
     await microtasks()
 
-    expect(outbox.isEmpty()).toBe(true)
+    expect(outbox.pendingKeys()).toEqual([])
   })
 })
 
@@ -141,7 +141,7 @@ describe('flush — batch writer', () => {
       ['A1', 'a'],
       ['B2', 'b'],
     ])
-    expect(outbox.isEmpty()).toBe(true)
+    expect(outbox.pendingKeys()).toEqual([])
   })
 
   it('keeps the whole batch pending when the call throws', async () => {
@@ -153,7 +153,7 @@ describe('flush — batch writer', () => {
     await microtasks()
 
     expect(outbox.pendingKeys()).toEqual(['A1', 'B2'])
-    expect(outbox.failures().map((f) => f.attempts)).toEqual([1, 1])
+    expect(outbox.failures(0).map((f) => f.attempts)).toEqual([1, 1])
   })
 
   it('fails only the keys the call reports', async () => {
@@ -165,7 +165,7 @@ describe('flush — batch writer', () => {
     await microtasks()
 
     expect(outbox.pendingKeys()).toEqual(['B2'])
-    expect(outbox.failures()[0]?.key).toBe('B2')
+    expect(outbox.failures(0)[0]?.key).toBe('B2')
   })
 
   it('applies the version guard per key inside a batch', async () => {
@@ -190,7 +190,7 @@ describe('flush — batch writer', () => {
     flusher.dispatch()
     await microtasks()
 
-    expect(outbox.isEmpty()).toBe(true)
+    expect(outbox.pendingKeys()).toEqual([])
   })
 })
 
@@ -224,7 +224,7 @@ describe('flush — dispatch clocks', () => {
     await done
 
     expect(settled).toBe(true)
-    expect(outbox.isEmpty()).toBe(true)
+    expect(outbox.pendingKeys()).toEqual([])
   })
 
   it('flush() waits for a flight that was already in the air', async () => {

@@ -9,6 +9,14 @@
  * honest proof is a real keyboard against a real `<input>` while a real request
  * is in the air.
  *
+ * The jump test is built from the exact keystrokes this script sent: every
+ * value the input is ever seen holding must be a prefix of what was typed, and
+ * the sequence must never go backwards. That holds whatever the fixture's
+ * server answers with — it does not depend on the demo happening to uppercase.
+ *
+ * Every wait is a poll against the live DOM. A fixed sleep racing the page's
+ * own 1000ms interval is how a check becomes a coin toss nobody trusts.
+ *
  *   npm run check:browser
  *   CHROME_PATH=/path/to/chrome npm run check:browser
  *
@@ -88,7 +96,7 @@ async function type(cdp, page, string_, afterEach) {
 }
 
 /** Poll until `predicate` holds, or give up after `timeout` ms. */
-async function waitFor(predicate, timeout = 6000, step = 150) {
+async function waitFor(predicate, timeout = 8000, step = 100) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     if (await predicate()) return true
@@ -97,85 +105,173 @@ async function waitFor(predicate, timeout = 6000, step = 150) {
   return false
 }
 
+/**
+ * The request log as an ordered list of events. `PUT` = a request left,
+ * `200`/`207` = one answered.
+ */
+const requestTrace = (log) =>
+  log
+    .split('\n')
+    .map((line) => (line.includes('PUT') ? 'out' : line.includes('200') ? 'back' : undefined))
+    .filter(Boolean)
+
+/**
+ * H5, read straight off the page: a second request for a key may not leave
+ * before the first has answered. This is what the 0.1.0 discard() bug broke —
+ * two concurrent flights, landing out of order, server left holding the stale
+ * value.
+ */
+const overlappingRequests = (trace) => {
+  let inAir = 0
+  let worst = 0
+  for (const event of trace) {
+    inAir += event === 'out' ? 1 : -1
+    worst = Math.max(worst, inAir)
+  }
+  return worst
+}
+
 const server = await serve()
 const { proc, wsUrl } = await launchChrome({ port: 9341 })
 const cdp = await Cdp.connect(wsUrl)
 const page = await newPage(cdp, `http://127.0.0.1:${PORT}/playground.html`)
 
 try {
-  await sleep(500)
-  check('the page mounted', (await text(page, 'log')).length > 0)
+  check('the page mounted', await waitFor(async () => (await text(page, 'log')).length > 0))
 
   // ------------------------------------------------------ 1: the cell does not jump
+  const TYPED = 'hello world'
   await focus(page, 'cell')
   await type(cdp, page, 'hel')
 
-  // Let the first flush go out (interval 1000ms) — the server takes 2s to answer.
-  await sleep(1300)
-  check('a request went out for what was typed', (await text(page, 'log')).includes('"hel"'))
-  check('the key is in flight', (await text(page, 'inflight')).includes('A1'))
-
-  // Keep typing while that request is still in the air, sampling the live input.
-  const observed = new Set()
-  const sample = async () => observed.add(await inputValue(page, 'cell'))
-  await sample()
-  // Sample after every keystroke AND while the response lands, so a jump has
-  // nowhere to hide.
-  await type(cdp, page, 'lo world', sample)
-  for (let i = 0; i < 30; i += 1) {
-    await sample()
-    await sleep(120)
-  }
-
-  const jumped = [...observed].filter((value) => value !== value.toLowerCase())
+  // The page flushes on a 1000ms interval and the fake server takes 2s to
+  // answer, so poll rather than guessing how long that takes here.
   check(
-    'the input never showed the server value while the user was typing',
-    jumped.length === 0,
-    jumped.length ? `saw ${JSON.stringify(jumped)}` : `${observed.size} distinct values, all local`,
+    'a request went out for what was typed',
+    await waitFor(async () => (await text(page, 'log')).includes('"hel"')),
+  )
+  check(
+    'the key is in flight',
+    await waitFor(async () => (await text(page, 'inflight')).includes('A1')),
+  )
+
+  // Keep typing while that request is still in the air, sampling the live
+  // input after every keystroke and until the response has landed, so a jump
+  // has nowhere to hide.
+  const observed = []
+  const sample = async () => observed.push(await inputValue(page, 'cell'))
+  await sample()
+  await type(cdp, page, 'lo world', sample)
+  const responded = await waitFor(async () => {
+    await sample()
+    return (await text(page, 'log')).includes('(discarded)')
+  })
+  check('the slow response actually came back (or this proves nothing)', responded)
+  await sample()
+
+  // Everything the input was ever seen holding must be something the user
+  // typed: a prefix of TYPED, and never shorter than the sample before it.
+  const foreign = observed.filter((value) => !TYPED.startsWith(value))
+  const wentBackwards = observed.filter(
+    (value, index) => index > 0 && value.length < observed[index - 1].length,
+  )
+  check(
+    'the input only ever held what the user had typed',
+    foreign.length === 0 && wentBackwards.length === 0,
+    foreign.length || wentBackwards.length
+      ? `foreign ${JSON.stringify(foreign)} / backwards ${JSON.stringify(wentBackwards)}`
+      : `${new Set(observed).size} distinct values across ${observed.length} samples`,
   )
   check(
     'the input holds exactly what was typed',
-    (await inputValue(page, 'cell')) === 'hello world',
+    (await inputValue(page, 'cell')) === TYPED,
     JSON.stringify(await inputValue(page, 'cell')),
   )
 
-  const log = await text(page, 'log')
-  const puts = log.split('\n').filter((line) => line.includes('PUT'))
-  check('the edit made during the flight went out afterwards', log.includes('"hello world"'))
-  check('two requests for eleven keystrokes', puts.length === 2, `${puts.length} PUTs`)
-  check('the response was discarded', log.includes('(discarded)'))
   const settled = await waitFor(async () => (await text(page, 'pending')).includes('none'))
   check('nothing is left pending once the second response lands', settled)
 
+  const log = await text(page, 'log')
+  const puts = log.split('\n').filter((line) => line.includes('PUT'))
+  check('the edit made during the flight went out afterwards', log.includes(`"${TYPED}"`))
+  check(
+    'eleven keystrokes went out as two requests',
+    puts.length === 2,
+    `${puts.length} PUTs for ${TYPED.length} keystrokes`,
+  )
+  check('the response was discarded', log.includes('(discarded)'))
+  check(
+    'no two requests for one key were ever in the air at once',
+    overlappingRequests(requestTrace(log)) === 1,
+    log.replace(/\n/g, ' | '),
+  )
+
+  // ------------------- 1b: discard() while a request is out (the 0.1.0 data-loss bug)
+  // Type, wait for the request to leave, discard the queued write, then type
+  // again. The request on the wire cannot be recalled, so the next one must
+  // wait for it — in 0.1.0 a second request left immediately and the two could
+  // land out of order, leaving the server holding the older value.
+  await focus(page, 'cell')
+  await type(cdp, page, '!')
+  check(
+    'a second edit went out',
+    await waitFor(async () => (await text(page, 'inflight')).includes('A1')),
+  )
+  await page.evaluate(`document.querySelector('[data-testid="discard-a1"]').click()`)
+  await type(cdp, page, '?')
+  const drained = await waitFor(async () => (await text(page, 'pending')).includes('none'), 12000)
+  check('the outbox drains after a discard mid-flight', drained)
+
+  const afterDiscard = await text(page, 'log')
+  check(
+    'discarding an in-flight key did not open a second concurrent request',
+    overlappingRequests(requestTrace(afterDiscard)) === 1,
+    afterDiscard.replace(/\n/g, ' | '),
+  )
+  const lastPut = afterDiscard
+    .split('\n')
+    .filter((line) => line.includes('PUT'))
+    .pop()
+  check(
+    'the last request the server saw carried the newest value',
+    lastPut?.includes(`"${TYPED}!?"`) ?? false,
+    lastPut ?? '<no PUT>',
+  )
+  check('the input still holds exactly what was typed', (await inputValue(page, 'cell')) === `${TYPED}!?`)
+
   // -------------------------------------------------------- 2: failure never rolls back
+  const attemptCount = async () => Number((await text(page, 'attempts')).replace(/\D/g, ''))
   await focus(page, 'flaky-cell')
   await type(cdp, page, 'draft')
-  await sleep(2400) // first attempt at ~1s, second after a ~1s backoff
 
+  check(
+    'it retried on its own',
+    await waitFor(async () => (await attemptCount()) >= 2),
+    `${await attemptCount()} attempts`,
+  )
   check('a failing key stays pending', (await text(page, 'flaky-pending')).includes('B2'))
   check('the failure is reported', (await text(page, 'failed')).includes('failed: 1'))
-  const attempts = Number((await text(page, 'attempts')).replace(/\D/g, ''))
-  check('it retried on its own', attempts >= 2, `${attempts} attempts`)
   check('local state was not rolled back', (await inputValue(page, 'flaky-cell')) === 'draft')
 
   await type(cdp, page, '-more')
   await page.evaluate(`document.querySelector('[data-testid="retry"]').click()`)
-  await sleep(1400)
   check(
     'the retry carried the current value, not the one that failed',
-    (await text(page, 'flaky-log')).includes('"draft-more"'),
+    await waitFor(async () => (await text(page, 'flaky-log')).includes('"draft-more"')),
   )
 
   await page.evaluate(`document.querySelector('[data-testid="discard"]').click()`)
-  await sleep(150)
-  check('discard() is what drops it', (await text(page, 'flaky-pending')).includes('none'))
+  check(
+    'discard() is what drops it',
+    await waitFor(async () => (await text(page, 'flaky-pending')).includes('none')),
+  )
 
   // ---------------------------------------------------------------- 3: batch endpoint
   await focus(page, 'batch-c1')
   await type(cdp, page, 'one')
   await focus(page, 'batch-c3')
   await type(cdp, page, 'three')
-  await sleep(1400)
+  await waitFor(async () => (await text(page, 'batch-log')).includes('PATCH'))
 
   const batchLog = await text(page, 'batch-log')
   check('both keys went out in one PATCH', batchLog.includes('"C1":"one"') && batchLog.includes('"C3":"three"'))

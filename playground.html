@@ -58,6 +58,11 @@
       <strong>UPPERCASED</strong>. Type, keep typing while the request is out, and watch the input:
       the reply never lands in it. This is the whole product.
     </p>
+    <p class="why">
+      <code>discard('A1')</code> drops the queued write. The request already on the wire cannot be
+      recalled, so the key waits for it before anything else goes out — read the log: a
+      <code>PUT</code> is always followed by its <code>200</code> before the next one.
+    </p>
     <label for="cell-a1">A1</label>
     <input id="cell-a1" type="text" v-model="cells.A1" data-testid="cell" autocomplete="off" />
     <div class="row">
@@ -67,6 +72,7 @@
       <span class="pill" data-testid="pending">pending: {{ outbox.pending.join(',') || 'none' }}</span>
       <span class="pill" data-testid="inflight">in flight: {{ outbox.inFlight.join(',') || 'none' }}</span>
       <button type="button" @click="outbox.flush()" data-testid="flush">flush()</button>
+      <button type="button" @click="outbox.discard('A1')" data-testid="discard-a1">discard('A1')</button>
     </div>
     <pre data-testid="log">{{ log.length ? log.join('\n') : 'no requests yet' }}</pre>
   </section>
@@ -174,9 +180,6 @@ createApp({
         return { failed }
       },
     })
-
-    // Handles for the headless check in scripts/browser-check.mjs.
-    window.__writeBehind = { cells, outbox, log, flaky, flakyOutbox, batch, batchOutbox }
 
     return { cells, outbox, log, flaky, flakyOutbox, flakyLog, serverDown, batch, batchOutbox, batchLog }
   },
