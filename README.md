@@ -24,6 +24,15 @@ The rest, each against a real (fake) server you can break from the card:
 npm install @ozjsey/vue-write-behind
 ```
 
+**Requires Vue `^3.2.0`.** `getCurrentScope` / `onScopeDispose` arrived with `effectScope` in 3.2.0,
+and this package calls them to release the outbox when its owner goes away. On 3.1.5 and below it
+fails at import (`Named export 'getCurrentScope' not found`) or, where the import resolves, on the
+first `useWriteBehind()`. Nothing here needs anything newer than 3.2 — the floor itself is in the
+test matrix, pinned to exactly `3.2.0`, and `npm install` on 3.1.5 is refused by the peer range.
+
+> Versions 0.1.0 and 0.1.1 declare `vue: ^3.0.0`. That was never true of any version of this
+> package; it is corrected here, not narrowed.
+
 > **On 0.1.0? Upgrade.** Calling `discard(key)` while that key's save was in flight let a
 > second, concurrent request go out for it. If the two landed out of order the server was left
 > holding the **older** value — with the newer one on screen, `pending` empty and no error anywhere.
@@ -263,7 +272,7 @@ delegating rather than by keeping a copy.
 - **`<KeepAlive>` changes nothing.** A deactivated component is cached, not disposed: its source
   watcher still runs, so an edit made while it is off screen is queued at once and goes out on the
   clock, and the flush on page-hide reaches it too. Only a real unmount stops the outbox. Measured
-  on Vue 3.5 and 3.3 in `keepAlive.test.ts`, which mounts components for real.
+  on Vue 3.2, 3.3 and 3.5 in `keepAlive.test.ts`, which mounts components for real.
 - **A key deleted from the source keeps its queued write.** Losing it silently is exactly what this
   library refuses to do. Call `discard(key)` if you mean it.
 - **Outside an effect scope there is no cleanup.** Called in `setup()` (or any `effectScope`) the
@@ -328,15 +337,20 @@ gives you a `write` whose value is a `number`.
 ## Development
 
 ```bash
-npm test               # vitest: the composable, on Vue 3.5 and 3.3 in jsdom, plus SSR in node.
+npm test               # vitest: the composable in jsdom on Vue 3.2.0 (the declared floor, pinned),
+                       # 3.3.13 and ^3.5.0, plus SSR in node — 198 declarations.
                        # The engine's own suites live in ../write-behind
 npm run typecheck      # tsc over source and tests
 npm run build          # tsup → dist/*.min.js + .cjs + .d.ts (the engine stays external)
 npm run check:dist     # drive the BUILT artifact on real timers — dist goes stale silently
 npm run check:browser  # headless Chrome: type into a real input while a slow server answers,
-                       # and read the value back out of the live DOM
-npm run link:core      # symlink + rebuild the sibling engine, until it is on the registry
+                       # and read the value back out of the live DOM (26 checks)
 ```
+
+`npm install` is the whole setup — the engine is a published dependency and every check resolves it
+from `node_modules`. (There was once a `link:core` script for the window before it was published;
+it is gone, and `check:browser` chained it for two commits after it went, which left that check
+dead. Both are fixed.)
 
 `playground.html` is that browser check's page — serve the package directory and open it to try the
 three cards by hand (`npm run check:browser` builds, serves and drives it for you). The claim it

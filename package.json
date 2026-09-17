@@ -37,7 +37,7 @@
     "build": "tsup vueWriteBehind.ts --external @ozjsey/write-behind --format esm,cjs --minify --sourcemap --dts --out-dir dist --clean && mv dist/vueWriteBehind.js dist/vueWriteBehind.min.js && mv dist/vueWriteBehind.js.map dist/vueWriteBehind.min.js.map && mv dist/vueWriteBehind.cjs dist/vueWriteBehind.min.cjs && mv dist/vueWriteBehind.cjs.map dist/vueWriteBehind.min.cjs.map && mv dist/vueWriteBehind.d.cts dist/vueWriteBehind.min.d.cts && node -e \"const fs=require('fs');for(const f of ['vueWriteBehind.min.js','vueWriteBehind.min.cjs']){const p='dist/'+f;let s=fs.readFileSync(p,'utf8');s=s.replace(/\\/\\/# sourceMappingURL=vueWriteBehind\\.(js|cjs)\\.map/, '//# sourceMappingURL='+f+'.map');fs.writeFileSync(p,s);}\"",
     "test": "vitest run",
     "check:dist": "npm run build && node dist-check.mjs",
-    "check:browser": "npm run link:core && npm run build && node scripts/browser-check.mjs",
+    "check:browser": "npm run build && node scripts/browser-check.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "npm run build"
   },
@@ -63,7 +63,7 @@
     "@ozjsey/write-behind": "^0.1.0"
   },
   "peerDependencies": {
-    "vue": "^3.0.0"
+    "vue": "^3.2.0"
   },
   "devDependencies": {
     "jsdom": "^25.0.0",
@@ -71,6 +71,7 @@
     "typescript": "^5.5.0",
     "vitest": "^2.0.0",
     "vue": "^3.5.0",
+    "vue3_2": "npm:vue@3.2.0",
     "vue3_3": "npm:vue@3.3.13"
   },
   "publishConfig": {

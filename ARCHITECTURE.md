@@ -81,27 +81,56 @@ page-hide reaches it too. Only a real unmount stops any of it, and that is `onSc
 
 `keepAlive.test.ts` is the only suite here that mounts real components (`createApp` against a
 container — `@vue/test-utils` is deliberately not a dependency), because `effectScope()` cannot
-express deactivation at all. It runs on both Vue versions, which is the point: `pause()` is 3.5-only,
-so "deactivation changes nothing" has to be checked on each rather than assumed from one.
+express deactivation at all. It runs on all three Vue versions, which is the point: `pause()` is
+3.5-only, so "deactivation changes nothing" has to be checked on each rather than assumed from one.
+
+## The Vue floor: `^3.2.0`
+
+`src/lifecycle.ts` imports `getCurrentScope` and `onScopeDispose`. Both arrived with `effectScope`
+in **Vue 3.2.0** and neither exists in 3.1.5 — not from the Node entry, not from the
+`@vue/reactivity` esm-bundler entry a Vite or webpack user resolves. Below the floor the package
+does not survive the import at all under Node ESM (`SyntaxError: Named export 'getCurrentScope' not
+found`, measured against the packed tarball on `vue@3.1.5`); where the binding resolves to
+`undefined` instead, it is `TypeError: getCurrentScope is not a function` at the first
+`useWriteBehind()` call (measured by pointing the test matrix's alias at 3.1.5: all 65 declarations
+fail, every one of them there). Everything else this package touches (`isRef`, `shallowReactive`,
+`watch`, `watch(…, { deep: true })`, the `Ref` type) is 3.0.0.
+
+So the peer range is `^3.2.0`, and `vitest.workspace.ts`'s `vue-3.2` project pins the alias to
+exactly `3.2.0` to run the floor rather than assert it. Until 2026-09-17 the range said `^3.0.0`
+and the matrix's lowest version was 3.3.13 — a claim, and a gate incapable of contradicting it.
 
 ## Testing
 
-`useWriteBehind.test.ts` (56 declarations) and `keepAlive.test.ts` (9) both run in jsdom against Vue
-3.5 **and** Vue 3.3 — the `vue: ^3.0.0` peer range is a claim, and `watch(..., { deep: true })`,
-`shallowReactive` and `onScopeDispose` all predate 3.5. `vueWriteBehind.ssr.test.ts` (3) runs in
-`environment: 'node'` to prove the package imports with no top-level DOM access and starts **no
-timer** on the server.
+Three jsdom projects run the same two suites — `useWriteBehind.test.ts` (56 declarations) and
+`keepAlive.test.ts` (9) — against Vue **3.2.0** (the declared floor, pinned), **3.3.13** and the
+default **^3.5.0**. `vueWriteBehind.ssr.test.ts` (3) runs in `environment: 'node'` to prove the
+package imports with no top-level DOM access and starts **no timer** on the server. **198
+declarations in total**, and `npm test` runs all of them.
 
-Both projects alias `@ozjsey/write-behind` to the sibling's **source**, never its `dist/` — a test
-run reading a sibling's last build instead of its working tree is the stale-dist trap one package
-further out. The engine's own suites (the state machine, the clock, the writer adapters, the diff)
-live in that package; re-proving them here would be a second copy that could drift.
+Every project resolves `@ozjsey/write-behind` from **`node_modules`**, by version and integrity
+hash, exactly as a consumer resolves it — so these suites exercise the bytes npm serves, not a
+sibling working tree. That is the opposite of what this file said until 2026-09-17: the suites used
+to alias the specifier to `../write-behind/writeBehind.ts`, which meant they proved something about
+one checkout and could not run anywhere else at all (CI, which has only this repo, failed every
+suite with "Failed to resolve import '@ozjsey/write-behind'"). `tsconfig.json` carries no `paths`
+override for the same reason, and for one more: a missing `paths` target is not an error in
+TypeScript, it is a silent fall-through to `node_modules`, so the old mapping made `npm run
+typecheck` read a different source of truth per machine with nothing in the output to say so.
 
-`npm run check:dist` is where the built artifacts get their turn: it rebuilds the engine, rebuilds
-this package, and drives the tarball's entry on real timers — through the real
-`node_modules/@ozjsey/write-behind` resolution, so it also proves the dependency wiring. `npm run
-check:browser` does the same in headless Chrome against `playground.html`, which is the only check
-that can make the claim no unit test can: **the cell does not jump.**
+The engine's own suites (the state machine, the clock, the writer adapters, the diff) live in that
+package; re-proving them here would be a second copy that could drift.
+
+`npm run check:dist` is where the built artifacts get their turn: it rebuilds this package and
+drives the tarball's entry on real timers — through the real `node_modules/@ozjsey/write-behind`
+resolution, so it also proves the dependency wiring. `npm run check:browser` does the same in
+headless Chrome against `playground.html` (**26 checks**), which is the only check that can make the
+claim no unit test can: **the cell does not jump.**
+
+None of these prove the *published tarball* installs against the floor — they run source against an
+aliased Vue. That takes `npm pack` and a real install into an empty project on `vue@3.2.0`, which is
+the clean-directory verify step in the workspace's `PUBLISHING.md`. Run both halves: the floor must
+install and import, and one minor below must fail. A check that only ever passes is not a check.
 
 ## Copy-paste consumers
 
@@ -115,10 +144,14 @@ The modules import each other without file extensions (`./types`), which is what
 `moduleResolution: bundler` (this repo's `tsconfig.json`, and Vite/webpack/tsup projects) expects;
 under `NodeNext` or plain Node ESM add the `.js` suffix.
 
-## Local development before the engine is published
+## Local development
 
-`@ozjsey/write-behind` is declared as `^0.1.0` and, until it is on the registry, is not installable.
-`npm run link:core` symlinks the sibling checkout into `node_modules/@ozjsey/` exactly as `npm link`
-would and rebuilds it; `check:dist` and `check:browser` run it first, because those two are the
-checks that resolve the engine by bare specifier through Node rather than through a bundler alias.
-Once it is published, an ordinary `npm install` replaces that script entirely.
+`npm install`, and that is all. `@ozjsey/write-behind` is declared as `^0.1.0` and has been on the
+registry since 2026-09-14, so every check here — the suites, `check:dist`, `check:browser`,
+`typecheck` — resolves it out of `node_modules` like any consumer.
+
+There is no `link:core` script and no sibling symlink. One existed while the engine was unpublished;
+commit `24795b2` deleted it and `scripts/link-core.mjs` with it. This section described it for two
+commits afterwards and `check:browser` still chained it, which left that check dead (`npm error
+Missing script: "link:core"`) until 2026-09-17. To work against an unreleased engine, use `npm link`
+directly rather than reinstating a wrapper.

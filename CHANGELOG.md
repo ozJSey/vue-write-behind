@@ -4,16 +4,16 @@ All notable changes to `@ozjsey/vue-write-behind`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-09-17
+## 0.2.0 — 2026-09-17
 
 Supersedes `0.1.1` (published 2026-09-14T10:03:16Z). Release state is verified against
 `registry.npmjs.org` by `node scripts/changelog-audit.mjs`, never against this file.
 
 **Mostly re-plumbing. `useWriteBehind`'s surface did not move: same signature, same returned store,
 same type names, same behaviour** — every one of the 54 existing test declarations still passes
-across Vue 3.5, Vue 3.3 and the node/SSR project with **no assertion changed**, and the browser
-check passes unchanged. (Four writer helpers *inside* those tests grew the new third parameter so
-they could forward it; nothing they assert moved.)
+across every Vue project in the matrix and the node/SSR project with **no assertion changed**, and
+the browser check passes unchanged. (Four writer helpers *inside* those tests grew the new third
+parameter so they could forward it; nothing they assert moved.)
 
 The one addition on top of that is the page-refresh work below. It widens the writer signature
 additively — an existing writer is unaffected — and is inherited from the engine rather than
@@ -41,6 +41,31 @@ implemented here.
   It is the only user-visible string that moved; nothing in this repo or its tests ever matched on
   it.
 
+- **`peerDependencies.vue` is `^3.2.0`. It said `^3.0.0`, and that was never true** — including in
+  0.1.0 and 0.1.1, which are on the registry saying it today.
+
+  `src/lifecycle.ts` calls `getCurrentScope()` and `onScopeDispose()` to release the outbox when the
+  composable's owner goes away. Both arrived with `effectScope` in **Vue 3.2.0** (2021-08-09) and
+  neither exists in **3.1.5** (2021-07-16) — not in the Node entry, not in the `@vue/reactivity`
+  esm-bundler entry a Vite or webpack build resolves. So on any Vue the old range admitted below
+  3.2 the package was unusable, in whichever way that environment fails first: under Node ESM the
+  import itself throws `SyntaxError: Named export 'getCurrentScope' not found`, a bundler fails at
+  build time, and only on the CommonJS path do you get as far as the first `useWriteBehind()` and
+  a `TypeError: getCurrentScope is not a function`. This is a correction to a range that never
+  described the code, not a drop of support that existed.
+
+  Nothing else raises the floor: `isRef`, `shallowReactive`, `watch`, `watch(…, { deep: true })` and
+  the `Ref` type are all 3.0.0. `onScopeDispose`'s `failSilently` argument would let the guard go,
+  but it is 3.5-only and not worth three minors of floor.
+
+  The matrix now runs the floor instead of asserting it — `vitest.workspace.ts` gained a `vue-3.2`
+  project pinned to exactly `3.2.0`, alongside 3.3.13 and the default `^3.5.0`. Pointed one minor
+  lower, all 65 mounting/composable declarations fail — 9 of them (`keepAlive.test.ts`) at
+  `src/lifecycle.ts:39` with `TypeError: getCurrentScope is not a function`, and the other 56 at
+  `useWriteBehind.test.ts:19`, where the harness's own `effectScope` import is itself 3.2-only. The
+  point holds either way: the old 3.3/3.5 pair claimed to prove `^3.0.0` and could not have, its
+  lowest version being more than a minor above the first Vue that has the API.
+
 ### Added
 
 - **A write can now survive a page refresh**, and every bit of it is inherited from the engine —
@@ -50,7 +75,7 @@ implemented here.
   - **`pagehide` is flushed on, as well as `visibilitychange → hidden`**, de-duplicated so a browser
     firing both sends one request. 0.1.1 listened only to `visibilitychange`, so an iOS Safari
     swipe-away — which fires `pagehide` and nothing else — flushed **nothing**. Measured on 0.1.1,
-    on both supported Vue versions.
+    on the two Vue versions the matrix ran at the time (3.3 and 3.5).
   - **Your writer is told when the page is going away.** A third argument to `write` and a second to
     `flush`, both additive — a two-argument writer keeps compiling and keeps working:
 
@@ -94,7 +119,7 @@ implemented here.
 A deactivated component had never been exercised: `useWriteBehind.test.ts` drives everything through
 `effectScope()` and never mounts anything, so `<KeepAlive>` was untested and undocumented. It now
 has a suite that mounts real components (`keepAlive.test.ts`, `createApp` against a container —
-`@vue/test-utils` stays out of the devDependencies), run on Vue 3.5 **and** 3.3.
+`@vue/test-utils` stays out of the devDependencies), run on Vue 3.2, 3.3 **and** 3.5.
 
 The finding is that **deactivation changes nothing**. Vue 3.5 added `EffectScope.pause()`, but
 `KeepAlive` does not use it — deactivating only sets `instance.isDeactivated`. So the deep source
@@ -110,15 +135,38 @@ is `onScopeDispose`. No behaviour changed here; what changed is that it is now p
   global and fires `pagehide` for real, which turns it into the only check that proves the unload
   flush works through the **built** artifacts and the real package resolution.
 
+- **`npm run check:browser` could not run at all.** It chained `npm run link:core`, a script deleted
+  two commits earlier, so the whole gate stopped at `npm error Missing script: "link:core"` — while
+  `ARCHITECTURE.md` called it the one check that can prove the cell does not jump. The wrapper now
+  builds and drives the page directly, which is all it ever needed: **26 checks, all passing.**
+
+- **`npm run typecheck` read a different source of truth on different machines.** `tsconfig.json`
+  mapped `@ozjsey/write-behind` to `../write-behind/writeBehind.ts`, a path outside this repo. A
+  missing `paths` target is not an error in TypeScript — it falls through to `node_modules` in
+  silence — so the command checked a sibling working tree where one happened to exist and the
+  installed tarball's `.d.ts` everywhere else, with nothing in the output to say which. The mapping
+  is gone; the engine is resolved from `node_modules`, the same place the suites resolve it.
+
 ### Notes
 
-- **`npm install` needs `@ozjsey/write-behind` to be on the registry.** Until it is, `npm run
-  link:core` symlinks the sibling checkout and rebuilds it; the unit suites resolve the engine from
-  its source through a vitest alias and need nothing.
+- **`npm install` is all it takes.** [`@ozjsey/write-behind`](https://www.npmjs.com/package/@ozjsey/write-behind)
+  has been on the registry since 2026-09-14 and is an ordinary dependency, resolved by version and
+  integrity hash. Every check in this repo — the three Vue projects, the SSR project, `check:dist`,
+  `check:browser` and `typecheck` — reads it from `node_modules`, so they all exercise the bytes npm
+  serves. There is no sibling symlink and no `link:core` script.
 
-[0.2.0]: https://github.com/ozJSey/vue-write-behind/releases/tag/v0.2.0
+  This entry replaces three sentences that were written at the start of 0.2.0 and outlived by the
+  two commits that invalidated them:
 
-## [0.1.1] — 2026-09-14
+  > **`npm install` needs `@ozjsey/write-behind` to be on the registry.** Until it is, `npm run
+  > link:core` symlinks the sibling checkout and rebuilds it; the unit suites resolve the engine
+  > from its source through a vitest alias and need nothing.
+
+  By the time 0.2.0 was ready, `24795b2` had deleted the script, `9ac2ff6` had removed the alias,
+  and the engine had been published. A CHANGELOG ships inside the tarball, so all three would have
+  reached every reader as an instruction that their install could not resolve.
+
+## 0.1.1 — 2026-09-14
 
 **Upgrade from 0.1.0. It could lose a write silently, with nothing on screen to say so.**
 
@@ -248,7 +296,7 @@ is `onScopeDispose`. No behaviour changed here; what changed is that it is now p
   brief; `playground.html` is a CDP fixture rather than a copy-pasteable example. Tracked in
   `tickets/WBC-3-playground-and-docs.md` and `tickets/WBC-5-brief-and-backlog-entry.md`.
 
-## [0.1.0] — 2026-09-13
+## 0.1.0 — 2026-09-13
 
 First release, published to npm as `@ozjsey/vue-write-behind`.
 

@@ -10,7 +10,8 @@
  * exercised. `@vue/test-utils` is deliberately not a dependency; `createApp`
  * against a real container is enough and keeps the devDependency list honest.
  *
- * What it pins, measured identically on Vue 3.5.42 and Vue 3.3.13:
+ * What it pins, measured identically on Vue 3.2.0 (the declared floor), 3.3.13
+ * and 3.5.42:
  *
  *   - **deactivation does not pause anything.** Vue 3.5 added
  *     `EffectScope.pause()`, but `KeepAlive` does not use it — deactivating only
