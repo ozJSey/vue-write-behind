@@ -1,7 +1,7 @@
 {
   "name": "@ozjsey/vue-write-behind",
-  "version": "0.2.0",
-  "description": "Write-behind cache for Vue 3 — local state stays authoritative, the server's reply is discarded on purpose, and a failed save never rolls back or drops what the user typed",
+  "version": "0.2.1",
+  "description": "Write-behind cache for Vue 3 \u2014 local state stays authoritative, the server's reply is discarded on purpose, and a failed save never rolls back or drops what the user typed",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
   "repository": {
