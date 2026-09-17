@@ -4,7 +4,10 @@ All notable changes to `@ozjsey/vue-write-behind`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-09-14
+## [0.2.0] — 2026-09-17
+
+Supersedes `0.1.1` (published 2026-09-14T10:03:16Z). Release state is verified against
+`registry.npmjs.org` by `node scripts/changelog-audit.mjs`, never against this file.
 
 **Mostly re-plumbing. `useWriteBehind`'s surface did not move: same signature, same returned store,
 same type names, same behaviour** — every one of the 54 existing test declarations still passes
@@ -115,7 +118,7 @@ is `onScopeDispose`. No behaviour changed here; what changed is that it is now p
 
 [0.2.0]: https://github.com/ozJSey/vue-write-behind/releases/tag/v0.2.0
 
-## [0.1.1] — 2026-09-13
+## [0.1.1] — 2026-09-14
 
 **Upgrade from 0.1.0. It could lose a write silently, with nothing on screen to say so.**
 
@@ -245,7 +248,7 @@ is `onScopeDispose`. No behaviour changed here; what changed is that it is now p
   brief; `playground.html` is a CDP fixture rather than a copy-pasteable example. Tracked in
   `tickets/WBC-3-playground-and-docs.md` and `tickets/WBC-5-brief-and-backlog-entry.md`.
 
-## [0.1.0] — 2026-09-05
+## [0.1.0] — 2026-09-13
 
 First release, published to npm as `@ozjsey/vue-write-behind`.
 
