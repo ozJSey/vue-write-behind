@@ -2,7 +2,10 @@
 
 One composable over a reactive record: edit local state, and the writes go out on a clock.
 
-[![npm version](https://img.shields.io/npm/v/@ozjsey/vue-write-behind.svg)](https://www.npmjs.com/package/@ozjsey/vue-write-behind)
+[![npm](https://img.shields.io/npm/v/@ozjsey/vue-write-behind.svg)](https://www.npmjs.com/package/@ozjsey/vue-write-behind)
+![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![gzipped 0.43 KiB](https://img.shields.io/badge/gzipped-0.43%20KiB-blue.svg)
+![dependencies 1](https://img.shields.io/badge/dependencies-1-blue.svg)
 
 > **[See it live](https://ozjsey.github.io/npm-portfolio-playground/#vue-write-behind)** — eleven
 > cards, every option and every state member, each against a real (fake) server you can break from
