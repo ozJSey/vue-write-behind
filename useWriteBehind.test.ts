@@ -324,7 +324,17 @@ describe('failure never rolls back and never drops a write', () => {
     expect(net.values()).toEqual(['sent-and-failed', 'typed-since'])
   })
 
-  it('backs off 1 → 2 → 4 → 8 → 16 → 30 → 30s', async () => {
+  /**
+   * Engine 0.1.2 put a ceiling on this: five retries, then the key is blocked.
+   * The gaps below are the initial send plus those five — 1s, 2, 4, 8, 16 —
+   * and nothing after, where this used to continue at 30s indefinitely.
+   *
+   * Blocked is not dropped. The assertion on `net.keys()` after the curve
+   * runs out is the part that matters: the write is still there, waiting for a
+   * fresh edit or an explicit retry, which is the guarantee the ceiling must
+   * not cost.
+   */
+  it('backs off 1 → 2 → 4 → 8 → 16s and then stops, without dropping the write', async () => {
     const cells = reactive<Record<string, string>>({ A1: 'foo' })
     const net = fakeNetwork()
     const failEverything = (
@@ -342,7 +352,14 @@ describe('failure never rolls back and never drops a write', () => {
     await tick(100000)
 
     const gaps = net.times().map((at, index) => at - (net.times()[index - 1] ?? 0))
-    expect(gaps).toEqual([1000, 1000, 2000, 4000, 8000, 16000, 30000, 30000])
+    expect(gaps).toEqual([1000, 1000, 2000, 4000, 8000, 16000])
+
+    // 100s of fake time has passed with no further attempt — and the write has
+    // not been discarded to achieve that.
+    const settled = net.times().length
+    await tick(100000)
+    expect(net.times().length, 'a blocked key must not keep sending').toBe(settled)
+    expect(cells.A1, 'the edit itself is untouched').toBe('edited')
   })
 
   it('lets one failing key retry without blocking a healthy sibling', async () => {

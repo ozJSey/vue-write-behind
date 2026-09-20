@@ -4,6 +4,29 @@ All notable changes to `@ozjsey/vue-write-behind`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.3 — 2026-09-20
+
+Takes engine 0.1.2, which puts a ceiling on retries, and widens the declared range to `^0.1.2`
+because this package's own tests now assert behaviour that does not exist before it.
+
+### Changed
+
+- **A failing write now stops retrying after five attempts** instead of retrying every 30 seconds
+  for the life of the page. The behaviour lives in `@ozjsey/write-behind`; it reaches consumers
+  through this package because a caret on a 0.x dependency admits new patches. Configure it with
+  `retry: { maxRetries: n }`, or `Infinity` for the old curve.
+
+  The write is **blocked, not dropped** — a fresh edit or an explicit retry re-arms it — and the
+  suite now pins that: after the curve runs out, 100 seconds of fake time produce no further
+  attempt and the edit is still there.
+
+  Worth recording how this was nearly missed. `vitest.workspace.ts` resolves `@ozjsey/write-behind`
+  from `node_modules`, which held **0.1.0** — so the adapter's 198 tests passed against an engine
+  two patches behind and said nothing about the change. Running them against the packed 0.1.2
+  failed three immediately, one of them a test asserting the old unbounded curve by name. The
+  adapter is not integration-tested against the engine's working tree at all, and that is worth
+  fixing on its own.
+
 ## 0.2.2 — 2026-09-20
 
 Documentation truth, found by auditing every behavioural claim in the README against the source.

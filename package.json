@@ -1,6 +1,6 @@
 {
   "name": "@ozjsey/vue-write-behind",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Write-behind cache for Vue 3 \u2014 local state stays authoritative, the server's reply is discarded on purpose, and a failed save never rolls back or drops what the user typed",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
@@ -60,7 +60,7 @@
     "sync"
   ],
   "dependencies": {
-    "@ozjsey/write-behind": "^0.1.0"
+    "@ozjsey/write-behind": "^0.1.2"
   },
   "peerDependencies": {
     "vue": "^3.2.0"
