@@ -1,0 +1,57 @@
+name: CI
+
+# This package had no CI at all — only publish.yml — while every sibling had
+# this workflow. It is the one package in the portfolio whose behaviour comes
+# from somewhere else: the engine is a runtime dependency, so a change there
+# reaches consumers through this package's caret range without a line of this
+# repository changing. That makes the schedule below load-bearing rather than
+# routine.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Every 8 hours: 00:00, 08:00 and 16:00 UTC.
+    - cron: '0 */8 * * *'
+
+# Read-only. Everything here talks to the public npm registry and nothing else:
+# no secrets, no NODE_AUTH_TOKEN. Publishing is manual and stays the owner's.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Node 22, matching the sibling packages and the toolchain this is
+          # developed and released on locally.
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` installs exactly what package-lock.json pins, from the public
+      # registry — and fails outright if the lockfile has drifted out of sync
+      # with package.json. That is worth more here than anywhere else: the
+      # lockfile is what records which ENGINE version this package's tests were
+      # proven against, and it has been left behind by a version bump twice.
+      - run: npm ci
+
+      # The tests resolve @ozjsey/write-behind from node_modules rather than
+      # the sibling working tree, so on a clean checkout they run against the
+      # engine the lockfile pins. Locally that has meant passing against an
+      # engine two patches behind the sibling tree and saying nothing about it;
+      # here, `npm ci` makes the pinned version the honest one.
+      - run: npm test
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm run check:dist
+
+      # Tarball composition every run: catches a `files` entry that stopped
+      # matching, and source or test leakage, before it reaches the registry.
+      - run: npm pack --dry-run
