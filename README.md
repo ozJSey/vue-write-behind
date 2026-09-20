@@ -8,8 +8,8 @@ One composable over a reactive record: edit local state, and the writes go out o
 ![dependencies 1](https://img.shields.io/badge/dependencies-1-blue.svg)
 
 > **[See it live](https://ozjsey.github.io/npm-portfolio-playground/#vue-write-behind)** — eleven
-> cards, every option and every state member, each against a real (fake) server you can break from
-> the card.
+> cards covering every state member and every option but `autoFlush`, each against a real (fake)
+> server you can break from the card.
 
 ## The problem
 

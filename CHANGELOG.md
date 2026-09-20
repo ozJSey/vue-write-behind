@@ -4,6 +4,16 @@ All notable changes to `@ozjsey/vue-write-behind`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.2 — 2026-09-20
+
+Documentation truth, found by auditing every behavioural claim in the README against the source.
+
+### Fixed
+
+- **The README promised eleven cards covering "every option".** `autoFlush` is a public option the
+  composable honours, and no card demonstrates it. The card count and the state-member claim were
+  both accurate; the sentence now names the exception. Docs only.
+
 ## 0.2.1 — 2026-09-18
 
 Documentation only; no code change. The README is cut to a landing page — problem, solution,
